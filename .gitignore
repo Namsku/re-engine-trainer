@@ -1,0 +1,26 @@
+# Dev / build artifacts
+/deploy/
+/backups/
+/knowledge/
+/docs/
+/emv_engine/
+/requiem_trainer/
+.gemini/
+*.pyc
+__pycache__/
+
+# Large JSON source files (preprocessed into Lua)
+*.json
+
+# Test files
+/test_emv.lua
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store

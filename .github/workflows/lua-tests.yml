@@ -1,0 +1,32 @@
+name: Lua Tests
+
+on:
+  push:
+    paths:
+      - 'Deploy/**/*.lua'
+      - '.luacheckrc'
+  pull_request:
+    paths:
+      - 'Deploy/**/*.lua'
+      - '.luacheckrc'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Lua 5.4
+        run: sudo apt-get update && sudo apt-get install -y lua5.4
+
+      - name: Install LuaCheck
+        run: |
+          sudo apt-get install -y luarocks
+          sudo luarocks install luacheck
+
+      - name: Run unit tests
+        run: lua5.4 Deploy/test/test_trainer.lua
+
+      - name: Static analysis
+        run: luacheck Deploy/ --config .luacheckrc
+        continue-on-error: true  # advisory-only initially
