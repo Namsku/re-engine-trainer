@@ -933,6 +933,7 @@ end
 
 local spawn_cache = {}
 local spawn_last_scan = 0
+local spawn_font = nil  -- set each frame by render_spawn_markers
 
 
 local function scan_spawn_points()
@@ -1098,7 +1099,7 @@ local function render_spawn_cylinder(sp, dist, pp, short)
 
     local wp_bot = Vector3f.new(sp.x, sp.y, sp.z)
     local wp_top = Vector3f.new(sp.x, sp.y + 1.8, sp.z)
-    local wp_label = Vector3f.new(sp.x, sp.y + 2.2, sp.z)
+    local wp_label = Vector3f.new(sp.x, sp.y + 1.9, sp.z)
 
     if not is_in_sight(wp_bot) and not is_in_sight(wp_top) then return end
 
@@ -1130,13 +1131,12 @@ local function render_spawn_cylinder(sp, dist, pp, short)
 
     pcall(d2d.fill_rect, cx_bot - 3, cy_bot - 3, 6, 6, COL_DOT)
 
-    local lx, ly = sl and sl.x or cx_top, sl and sl.y or (cy_top - 20)
-    draw_text_pill(spawn_font, short, lx - 20, ly - 16, COL_TEXT, 14)
-    if pp then
-        draw_text_pill(spawn_font, string.format("%.0fm", dist), lx - 12, ly, COL_DIST, 14)
-    end
+    local lx = sl and sl.x or cx_top
+    local ly = sl and sl.y or (cy_top - 4)
+    local label = pp and string.format("%s  %.0fm", short, dist) or short
+    draw_text_pill(spawn_font, label, lx - 20, ly - 14, COL_TEXT, 14)
     if C.show_guid_titles and sp.guid and spawn_font then
-        draw_text_pill(spawn_font, sp.guid, lx - 20, ly + 14, 0xFFFFCC44, 14, 0x66111118)
+        draw_text_pill(spawn_font, sp.guid, lx - 20, ly, 0xFFAABBCC, 14, 0x66111118)
     end
 end
 
@@ -1152,7 +1152,7 @@ local function render_spawn_diamond(sp, dist, pp, short)
 
     local wp_ground = Vector3f.new(sp.x, sp.y, sp.z)
     local wp_mid    = Vector3f.new(sp.x, sp.y + 1.4, sp.z)
-    local wp_label  = Vector3f.new(sp.x, sp.y + 2.0, sp.z)
+    local wp_label  = Vector3f.new(sp.x, sp.y + 1.5, sp.z)
 
     if not is_in_sight(wp_ground) and not is_in_sight(wp_mid) then return end
 
@@ -1190,13 +1190,11 @@ local function render_spawn_diamond(sp, dist, pp, short)
         pcall(d2d.fill_rect, sg.x - 3, sg.y - 3, 6, 6, COL_DOT)
     end
 
-    local lx, ly = sl and sl.x or cx, sl and sl.y or (cy - size - 20)
-    draw_text_pill(spawn_font, short, lx - 20, ly - 16, COL_TEXT, 14)
-    if pp then
-        draw_text_pill(spawn_font, string.format("%.0fm", dist), lx - 12, ly, COL_DIST, 14)
-    end
+    local lx, ly = sl and sl.x or cx, sl and sl.y or (cy - size - 4)
+    local label = pp and string.format("%s  %.0fm", short, dist) or short
+    draw_text_pill(spawn_font, label, lx - 20, ly - 14, COL_TEXT, 14)
     if C.show_guid_titles and sp.guid and spawn_font then
-        draw_text_pill(spawn_font, sp.guid, lx - 20, ly + 14, 0xFFFFCC44, 14, 0x66111118)
+        draw_text_pill(spawn_font, sp.guid, lx - 20, ly, 0xFFAABBCC, 14, 0x66111118)
     end
 end
 
@@ -1211,7 +1209,7 @@ local function render_spawn_beacon(sp, dist, pp, short)
 
     local wp_ground = Vector3f.new(sp.x, sp.y, sp.z)
     local wp_top    = Vector3f.new(sp.x, sp.y + 4.0, sp.z)
-    local wp_label  = Vector3f.new(sp.x, sp.y + 4.4, sp.z)
+    local wp_label  = Vector3f.new(sp.x, sp.y + 4.1, sp.z)
 
     if not is_in_sight(wp_ground) and not is_in_sight(wp_top) then return end
 
@@ -1252,13 +1250,11 @@ local function render_spawn_beacon(sp, dist, pp, short)
     pcall(d2d.fill_rect, sg.x - static_arc, sg.y - math.floor(static_r * 0.2), static_arc * 2, 1, 0x6600CCFF)
     pcall(d2d.fill_rect, sg.x - static_arc, sg.y + math.floor(static_r * 0.2), static_arc * 2, 1, 0x6600CCFF)
 
-    local lx, ly = sl and sl.x or sg.x, sl and sl.y or (sg.y - 60)
-    draw_text_pill(spawn_font, short, lx - 20, ly - 16, COL_TEXT, 14)
-    if pp then
-        draw_text_pill(spawn_font, string.format("%.0fm", dist), lx - 12, ly, COL_DIST, 14)
-    end
+    local lx, ly = sl and sl.x or sg.x, sl and sl.y or (sg.y - 40)
+    local label = pp and string.format("%s  %.0fm", short, dist) or short
+    draw_text_pill(spawn_font, label, lx - 20, ly - 14, COL_TEXT, 14)
     if C.show_guid_titles and sp.guid and spawn_font then
-        draw_text_pill(spawn_font, sp.guid, lx - 20, ly + 14, 0xFFFFCC44, 14, 0x66111118)
+        draw_text_pill(spawn_font, sp.guid, lx - 20, ly, 0xFFAABBCC, 14, 0x66111118)
     end
 end
 
@@ -1275,18 +1271,12 @@ local function render_spawn_minimal(sp, dist, pp, short)
     if not sc then return end
 
     local cx, cy = sc.x, sc.y
-    local text = short
-    local text_w = #text * 7 + 12
+    local label = pp and string.format("%s  %.0fm", short, dist) or short
+    local text_w = #label * 7 + 12
     pcall(d2d.fill_rect, cx - text_w / 2, cy - 10, text_w, 20, COL_BG)
-    pcall(d2d.text, spawn_font, text, cx - text_w / 2 + 6, cy - 8, COL_TEXT)
-
-    if pp then
-        local dist_str = string.format("%.0fm", dist)
-        local dist_w = #dist_str * 7
-        pcall(d2d.text, spawn_font, dist_str, cx - dist_w / 2, cy + 12, COL_DIST)
-    end
+    pcall(d2d.text, spawn_font, label, cx - text_w / 2 + 6, cy - 8, COL_TEXT)
     if C.show_guid_titles and sp.guid and spawn_font then
-        pcall(d2d.text, spawn_font, sp.guid, cx - #sp.guid * 3.5, cy + 26, 0xFFFFCC44)
+        pcall(d2d.text, spawn_font, sp.guid, cx - #sp.guid * 3.5, cy + 12, 0xFFAABBCC)
     end
 end
 
@@ -1297,7 +1287,7 @@ local function render_spawn_markers()
     if not R.spawn_ui_open then return end
     if not has_d2d then return end
 
-    local spawn_font = OFont.get(14, true)
+    spawn_font = OFont.get(14, true)
     if not spawn_font then return end
 
     -- Periodic scan
@@ -1342,6 +1332,8 @@ end
 -- Register D2D rendering
 -- ═══════════════════════════════════════════════════════════════════════════
 
+local render_emv_objects_overlay  -- forward declaration (defined below, used in D2D callback)
+
 if has_d2d then
     d2d.register(function() end, function()
         pcall(draw_enemy_panel)
@@ -1351,6 +1343,7 @@ if has_d2d then
         pcall(render_hud_strip)
         pcall(render_dev_overlay)
         pcall(render_spawn_markers)
+        pcall(render_emv_objects_overlay)
     end)
 end
 
@@ -1456,7 +1449,7 @@ T.render_item_indicators = render_item_indicators
 -- EMV Objects 3D Overlay (same pattern as item indicators)
 -- ═══════════════════════════════════════════════════════════════════════════
 
-local function render_emv_objects_overlay()
+render_emv_objects_overlay = function()
     local EMV = _G.EMV
     if not EMV then return end
     local cfg = EMV._overlay_cfg
@@ -1464,12 +1457,166 @@ local function render_emv_objects_overlay()
     local objects = EMV._overlay_objects
     if not objects or #objects == 0 then return end
 
+    local style = cfg.style or C.obj_overlay_style or 5
+    local pp = T.ppos()
+
+    -- For styles 1-4 (3D markers), lightweight direct rendering via VPM
+    if style >= 1 and style <= 4 and has_d2d then
+        spawn_font = OFont.get(14, true)
+        if not spawn_font then return end
+
+        local camera = sdk.get_primary_camera()
+        if not camera then return end
+        local vpm = camera:call("get_ViewProjMatrix")
+        if not vpm then return end
+        local sw, sh = R.screen_w, R.screen_h
+        if (not sw or sw <= 0) then
+            pcall(function()
+                local sm = sdk.get_native_singleton("via.SceneManager")
+                local sm_td = sdk.find_type_definition("via.SceneManager")
+                if not sm or not sm_td then return end
+                local mainView = sdk.call_native_func(sm, sm_td, "get_MainView")
+                if not mainView then return end
+                local screen_size = mainView:call("get_WindowSize")
+                if screen_size then sw, sh = screen_size.w, screen_size.h end
+            end)
+        end
+        if not sw or sw <= 0 then return end
+
+        local v0, v1, v2, v3 = vpm[0], vpm[1], vpm[2], vpm[3]
+
+        -- Inline project helper (pure math, no SDK calls)
+        local function proj(wx, wy, wz)
+            local cX = v0.x*wx + v1.x*wy + v2.x*wz + v3.x
+            local cY = v0.y*wx + v1.y*wy + v2.y*wz + v3.y
+            local cW = v0.w*wx + v1.w*wy + v2.w*wz + v3.w
+            if cW <= 0.001 then return nil end
+            return (1.0 + cX/cW)*0.5*sw, (1.0 - cY/cW)*0.5*sh
+        end
+
+        local world_slots = {}
+        local COL_FILL   = 0x5500AAFF
+        local COL_BORDER = 0xCC00CCFF
+        local COL_TEXT   = 0xFFFFCC44
+        local COL_DOT    = 0xFFFFFFFF
+        local ppx, ppy, ppz = pp and pp.x, pp and pp.y, pp and pp.z
+        local fmt = "%s  %.0fm"
+
+        for i = 1, #objects do
+            local obj = objects[i]
+            local px, py, pz = obj.x, obj.y, obj.z
+            local live_dist = obj.dist or 0
+
+            -- Read live position (single pcall, no nesting)
+            local go = obj.gameobj
+            if go then
+                local ok, xf = pcall(go.call, go, "get_Transform")
+                if ok and xf then
+                    local ok2, p = pcall(xf.call, xf, "get_Position")
+                    if ok2 and p then
+                        px, py, pz = p.x, p.y, p.z
+                        if ppx then
+                            local dx, dy, dz = px - ppx, py - ppy, pz - ppz
+                            live_dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+                        end
+                    end
+                end
+            end
+            if not px then goto next_obj end
+
+            do -- scope block for local variables
+                -- World-space stacking
+                local wk = math.floor(px*2) .. "," .. math.floor(py*2) .. "," .. math.floor(pz*2)
+                local wi = world_slots[wk] or 0
+                world_slots[wk] = wi + 1
+                local y_stack = wi * 0.4
+
+                local sx, sy = proj(px, py + y_stack, pz)
+                if not sx then goto next_obj end
+
+                local short = obj.name or "?"
+                local label = string.format(fmt, short, live_dist)
+                local radius = math.max(6, math.min(30, math.floor(400 / (live_dist + 5))))
+
+                if style == 1 then
+                    -- Cylinder: filled rect below marker point
+                    local bot_sx, bot_sy = proj(px, py - 1.8 + y_stack, pz)
+                    if bot_sy then
+                        local h = math.max(4, bot_sy - sy)
+                        pcall(d2d.fill_rect, sx - radius, sy, radius*2, h, COL_FILL)
+                        pcall(d2d.fill_rect, sx - radius, sy, 2, h, COL_BORDER)
+                        pcall(d2d.fill_rect, sx + radius - 2, sy, 2, h, COL_BORDER)
+                        pcall(d2d.fill_rect, sx - radius, sy, radius*2, 2, COL_BORDER)
+                        pcall(d2d.fill_rect, sx - radius, bot_sy - 2, radius*2, 2, COL_BORDER)
+                    end
+                    pcall(d2d.fill_rect, sx - 3, sy - 3, 6, 6, COL_DOT)
+                elseif style == 2 then
+                    -- Diamond: diamond shape + ground line below
+                    local dsx, dsy = proj(px, py - 0.5 + y_stack, pz)  -- diamond sits 0.5m below obj
+                    local gsx, gsy = proj(px, py - 1.8 + y_stack, pz)  -- ground point
+                    if not dsx then return end
+                    local size = math.max(4, math.min(16, radius))
+                    -- Draw ground line from diamond to ground
+                    if gsy then
+                        local line_h = gsy - (dsy + size)
+                        if line_h > 2 then
+                            pcall(d2d.fill_rect, dsx - 1, dsy + size, 2, line_h, 0x6600AAFF)
+                        end
+                        pcall(d2d.fill_rect, gsx - 3, gsy - 3, 6, 6, COL_DOT)  -- ground dot
+                    end
+                    -- Draw diamond shape
+                    for i = 0, size do
+                        local w = size - i
+                        if w > 0 then
+                            pcall(d2d.fill_rect, dsx - w, dsy - i, w*2, 1, COL_FILL)
+                            pcall(d2d.fill_rect, dsx - w, dsy + i, w*2, 1, COL_FILL)
+                        end
+                    end
+                    -- Corner dots
+                    pcall(d2d.fill_rect, dsx - 1, dsy - size - 1, 2, 2, COL_BORDER)
+                    pcall(d2d.fill_rect, dsx - 1, dsy + size, 2, 2, COL_BORDER)
+                    pcall(d2d.fill_rect, dsx - size - 1, dsy - 1, 2, 2, COL_BORDER)
+                    pcall(d2d.fill_rect, dsx + size, dsy - 1, 2, 2, COL_BORDER)
+                    sx, sy = dsx, dsy  -- use diamond pos for label
+                elseif style == 3 then
+                    -- Beacon: pulsing line
+                    local bot_sx, bot_sy = proj(px, py - 2.0 + y_stack, pz)
+                    if bot_sy then
+                        local h = math.max(4, bot_sy - sy)
+                        pcall(d2d.fill_rect, sx - 1, sy, 2, h, COL_BORDER)
+                    end
+                    local pulse = (os.clock() * 2.0) % 1.0
+                    local pr = math.floor(radius * pulse)
+                    local pa = math.floor(200 * (1.0 - pulse))
+                    local pc = (pa << 24) | 0x00CCFF
+                    if pr > 2 then
+                        pcall(d2d.fill_rect, sx - pr, sy - 1, pr*2, 2, pc)
+                    end
+                    pcall(d2d.fill_rect, sx - 3, sy - 3, 6, 6, COL_DOT)
+                elseif style == 4 then
+                    -- Minimal: just the text pill at position
+                    pcall(d2d.fill_rect, sx - 3, sy - 3, 6, 6, COL_DOT)
+                end
+
+                -- Label above marker
+                draw_text_pill(spawn_font, label, sx - 20, sy - 18, COL_TEXT, 14)
+                if C.show_guid_titles and obj.guid and spawn_font then
+                    draw_text_pill(spawn_font, obj.guid, sx - 20, sy - 4, 0xFFAABBCC, 14, 0x66111118)
+                end
+            end -- do block
+            ::next_obj::
+        end
+        return
+    end
+
+    -- Style 5: Text-only labels (d2d text with VPM projection)
+    spawn_font = OFont.get(14, true)
+    if not spawn_font then return end
+
     local camera = sdk.get_primary_camera()
     if not camera then return end
     local vpm = camera:call("get_ViewProjMatrix")
     if not vpm then return end
-
-    -- Use cached screen dimensions
     local sw, sh = R.screen_w, R.screen_h
     if (not sw or sw <= 0) then
         pcall(function()
@@ -1484,60 +1631,71 @@ local function render_emv_objects_overlay()
     end
     if not sw or sw <= 0 then return end
 
-    -- Track used screen slots to stack overlapping labels
-    -- 80px grid catches nearby (not just identical) objects
+    local v0, v1, v2, v3 = vpm[0], vpm[1], vpm[2], vpm[3]
+    local function proj5(wx, wy, wz)
+        local cX = v0.x*wx + v1.x*wy + v2.x*wz + v3.x
+        local cY = v0.y*wx + v1.y*wy + v2.y*wz + v3.y
+        local cW = v0.w*wx + v1.w*wy + v2.w*wz + v3.w
+        if cW <= 0.001 then return nil end
+        return (1.0 + cX/cW)*0.5*sw, (1.0 - cY/cW)*0.5*sh
+    end
+
     local slots = {}
-    local LINE_H = 14
+    local LINE_H = 16
+    local ppx, ppy, ppz = pp and pp.x, pp and pp.y, pp and pp.z
 
-    for _, obj in ipairs(objects) do
-        if obj.x and obj.y and obj.z then
-            local v0, v1, v2, v3 = vpm[0], vpm[1], vpm[2], vpm[3]
-            local px, py, pz = obj.x, obj.y, obj.z
-            local clipX = v0.x * px + v1.x * py + v2.x * pz + v3.x
-            local clipY = v0.y * px + v1.y * py + v2.y * pz + v3.y
-            local clipW = v0.w * px + v1.w * py + v2.w * pz + v3.w
-            if clipW > 0.001 then
-                local nx, ny = clipX / clipW, clipY / clipW
-                local sx = (1.0 + nx) * 0.5 * sw
-                local sy = (1.0 - ny) * 0.5 * sh
+    for i = 1, #objects do
+        local obj = objects[i]
+        local px, py, pz = obj.x, obj.y, obj.z
+        local live_dist = obj.dist or 0
 
-                -- Stacking: quantize to 80px grid to catch nearby objects
-                local slot_key = math.floor(sx / 80) .. "," .. math.floor(sy / 80)
-                local slot_idx = slots[slot_key] or 0
-                slots[slot_key] = slot_idx + 1
-
-                -- Lines per entry: name + optionally guid + path
-                local lines = 1
-                if C.show_guid_titles then
-                    if obj.guid then lines = lines + 1 end
-                    if obj.folder_path then lines = lines + 1 end
-                end
-                local stack_off = slot_idx * (LINE_H * lines + 4) -- +4px gap between entries
-
-                -- Name label, stacked downward for overlapping objects
-                local text = string.format("%s: %.0fm", obj.name or "?", obj.dist or 0)
-                local color = obj.color or 0xFFFFFFFF
-                local ly = sy - 20 + stack_off
-                draw.text(text, sx + 1, ly + 1, 0xFF000000)
-                draw.text(text, sx, ly, color)
-
-                -- GUID below name (when enabled)
-                if C.show_guid_titles and obj.guid then
-                    draw.text(obj.guid, sx + 1, ly + LINE_H + 1, 0xFF000000)
-                    draw.text(obj.guid, sx, ly + LINE_H, 0xFFFFCC44)
-                end
-                -- Folder path below GUID
-                if C.show_guid_titles and obj.folder_path then
-                    local gy = obj.guid and (ly + LINE_H * 2) or (ly + LINE_H)
-                    draw.text(obj.folder_path, sx + 1, gy + 1, 0xFF000000)
-                    draw.text(obj.folder_path, sx, gy, 0xFFAABBCC)
+        local go = obj.gameobj
+        if go then
+            local ok, xf = pcall(go.call, go, "get_Transform")
+            if ok and xf then
+                local ok2, p = pcall(xf.call, xf, "get_Position")
+                if ok2 and p then
+                    px, py, pz = p.x, p.y, p.z
+                    if ppx then
+                        local dx, dy, dz = px - ppx, py - ppy, pz - ppz
+                        live_dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+                    end
                 end
             end
         end
+        if not px then goto next_txt end
+
+        do
+            local sx, sy = proj5(px, py, pz)
+            if not sx then goto next_txt end
+
+            local slot_key = math.floor(sx / 80) .. "," .. math.floor(sy / 80)
+            local slot_idx = slots[slot_key] or 0
+            slots[slot_key] = slot_idx + 1
+
+            local lines = 1
+            if C.show_guid_titles then
+                if obj.guid then lines = lines + 1 end
+                if obj.folder_path then lines = lines + 1 end
+            end
+            local stack_off = slot_idx * (LINE_H * lines + 4)
+
+            local text = string.format("%s  %.0fm", obj.name or "?", live_dist)
+            local color = obj.color or 0xFFFFFFFF
+            local ly = sy - 10 + stack_off
+            draw_text_pill(spawn_font, text, sx - 20, ly, color, 14)
+
+            if C.show_guid_titles and obj.guid then
+                draw_text_pill(spawn_font, obj.guid, sx - 20, ly + LINE_H, 0xFFAABBCC, 14, 0x66111118)
+            end
+            if C.show_guid_titles and obj.folder_path then
+                local gy = obj.guid and (ly + LINE_H * 2) or (ly + LINE_H)
+                draw_text_pill(spawn_font, obj.folder_path, sx - 20, gy, 0xFF88AACC, 14, 0x66111118)
+            end
+        end
+        ::next_txt::
     end
 end
-
-T.render_emv_objects_overlay = render_emv_objects_overlay
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Level Flow Rendering — show LFC positions in world

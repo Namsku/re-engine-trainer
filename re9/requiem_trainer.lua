@@ -126,6 +126,14 @@ local C = {
     show_spawns        = false,
     spawn_range        = 100,
     spawn_style        = 1,    -- 1=Cylinder, 2=Diamond, 3=Beacon, 4=Minimal
+    obj_overlay_style  = 5,    -- 1=Cylinder, 2=Diamond, 3=Beacon, 4=Minimal, 5=Text
+    obj_enabled        = false,
+    obj_show_overlay   = false,
+    obj_max_distance   = 15,
+    obj_sort_by_dist   = true,
+    obj_filter_idx     = 1,
+    obj_hide_static    = true,
+    obj_scan_interval  = 2.0,
     -- NoClip
     noclip             = false,
     noclip_speed       = 7.5,
@@ -135,6 +143,7 @@ local C = {
     noclip_yaw_offset  = 180.0,
     noclip_anti_death  = true,
     noclip_no_fall     = true,
+    noclip_sync_rotation = true,
     hk_noclip          = 0x71,  -- F2
     -- Save slot bindings
     quick_save_slot    = 0,      -- slot offset for Quick Save hotkey
@@ -1142,12 +1151,12 @@ re.on_frame(function()
     if R.tick % 10 == 0 and T.track_death_position then pcall(T.track_death_position) end
     if R.tick % 120 == 0 and C.show_area and T.scan_area_name then pcall(T.scan_area_name) end
     if R.tick % 30 == 0 and C.show_igt and T.scan_igt then pcall(T.scan_igt) end
+    -- EMV Objects overlay background scan (self-throttled by scan_interval)
+    if _G.EMV and _G.EMV.objects_background_update then pcall(_G.EMV.objects_background_update) end
     -- Item indicator scan (self-throttled by scan_interval)
     if C.show_items and T.scan_indicator_items then pcall(T.scan_indicator_items) end
     -- Item indicator render (every frame for smooth display)
     if C.show_items and T.render_item_indicators then pcall(T.render_item_indicators) end
-    -- EMV Objects overlay (same pattern as item indicators)
-    if T.render_emv_objects_overlay then pcall(T.render_emv_objects_overlay) end
     -- Level Flow indicators (every frame)
     if T.render_level_flow then pcall(T.render_level_flow) end
     -- Gravity Gun debug visualization (update runs in LateUpdateBehavior)

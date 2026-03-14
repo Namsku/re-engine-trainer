@@ -15,6 +15,10 @@ __pycache__/
 # Test files
 /test_emv.lua
 
+# Local scripts
+tools/sync_to_biorand.ps1
+tools/symlink_re9.bat
+
 # IDE
 .vscode/
 .idea/

@@ -189,7 +189,7 @@ local function ui_player()
         imgui.tree_pop()
     end
 
-    -- â”€â”€ NoClip â”€â”€
+    -- — NoClip —
     section("NoClip", CLR.CAT)
     do
         local nc_label = "NoClip"
@@ -228,6 +228,7 @@ local function ui_player()
         if ch_sl then C.noclip_slow = vsl; pcall(cfg_save) end
         tog("Anti-Death", "noclip_anti_death", nil, nil, "Prevent player death while noclipping")
         tog("No Fall Damage", "noclip_no_fall", nil, nil, "Suppress fall system to prevent fall death")
+        tog("Sync Rotation", "noclip_sync_rotation", nil, nil, "Rotate player body to face camera direction")
         local ch_y, vy = imgui.slider_float("Yaw Offset##nc", C.noclip_yaw_offset, 0, 360, "%.0fÂ°")
         if ch_y then C.noclip_yaw_offset = vy; pcall(cfg_save) end
         imgui.tree_pop()
@@ -1155,7 +1156,78 @@ local function ui_dev()
                 imgui.tree_pop()
             end
         end
-        if to_remove then table.remove(dev_positions, to_remove); dev_save_positions(); toast(("Removed position #%d"):format(to_remove), 0xFFFF6666) end
+    if to_remove then table.remove(dev_positions, to_remove); dev_save_positions(); toast(("Removed position #%d"):format(to_remove), 0xFFFF6666) end
+    end
+
+    -- ── Selected Object Editor ──
+    imgui.spacing(); imgui.separator(); imgui.spacing()
+    imgui.text_colored("Selected Object Editor", CLR.HEAD); imgui.spacing()
+    
+    local selected = nil
+    pcall(function()
+        local oe = reframework:get_object_explorer()
+        if oe then
+            local get_m = oe:get_type_definition():get_method("get_LastSelectedObject") or oe:get_type_definition():get_method("get_SelectedObject")
+            if get_m then selected = get_m:call(oe) end
+        end
+    end)
+    
+    if selected then
+        local valid_go = false
+        pcall(function()
+            if sdk.is_managed_object(selected) and selected:get_type_definition():is_a("via.GameObject") then
+                valid_go = true
+            elseif sdk.is_managed_object(selected) and selected:get_type_definition():is_a("via.Transform") then
+                selected = selected:call("get_GameObject")
+                if selected then valid_go = true end
+            elseif sdk.is_managed_object(selected) and selected:get_type_definition():is_a("via.behavior.Behavior") then
+                selected = selected:call("get_GameObject")
+                if selected then valid_go = true end
+            end
+        end)
+        
+        if valid_go then
+            local name = "?"
+            pcall(function() name = selected:call("get_Name") or "?" end)
+            imgui.text_colored("Target: " .. name, 0xFF88DDFF)
+            
+            local xf = nil
+            pcall(function() xf = selected:call("get_Transform") end)
+            if xf then
+                local px, py, pz = 0, 0, 0
+                local p = nil
+                pcall(function()
+                    p = xf:call("get_Position")
+                    if p then px, py, pz = p.x, p.y, p.z end
+                end)
+                
+                if p then
+                    local cx, vx = imgui.drag_float("X##sel_x", px, 0.05, -99999, 99999, "%.3f")
+                    local cy, vy = imgui.drag_float("Y##sel_y", py, 0.05, -99999, 99999, "%.3f")
+                    local cz, vz = imgui.drag_float("Z##sel_z", pz, 0.05, -99999, 99999, "%.3f")
+                    
+                    if cx or cy or cz then
+                        local nx = cx and vx or px
+                        local ny = cy and vy or py
+                        local nz = cz and vz or pz
+                        pcall(function()
+                            local m_set = sdk.find_type_definition("via.Transform"):get_method("set_Position")
+                            if m_set then m_set:call(xf, Vector3f.new(nx, ny, nz)) else xf:set_Position(Vector3f.new(nx, ny, nz), true) end
+                        end)
+                    end
+                else
+                    imgui.text_colored("(Cannot read position)", CLR.MUTED)
+                end
+            else
+                imgui.text_colored("(No Transform)", CLR.MUTED)
+            end
+        else
+            imgui.text_colored("Selected object is not a GameObject", CLR.MUTED)
+            imgui.text_small("Type: " .. (selected:get_type_definition() and selected:get_type_definition():get_full_name() or "Unknown"))
+        end
+    else
+        imgui.text_colored("No object selected.", CLR.MUTED)
+        imgui.text_small("To use this, select any GameObject or Transform in the original REFramework Object Explorer window.")
     end
 
     --[[ DISABLED: GameObject Browser

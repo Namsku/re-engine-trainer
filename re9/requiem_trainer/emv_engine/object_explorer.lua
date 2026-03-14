@@ -18,6 +18,19 @@
 local ObjectExplorer = {}
 local ControlPanel, CoreFunctions, TypeDB
 
+-- Cached via.Transform method handles (Native Call Trap workaround)
+-- xf:call("set_Position", v) silently fails; must use method:call(xf, v)
+local _xf_td, _m_set_pos, _m_set_local_pos, _m_set_euler, _m_set_local_scl
+pcall(function()
+    _xf_td = sdk.find_type_definition("via.Transform")
+    if _xf_td then
+        _m_set_pos       = _xf_td:get_method("set_Position")
+        _m_set_local_pos = _xf_td:get_method("set_LocalPosition")
+        _m_set_euler     = _xf_td:get_method("set_LocalEulerAngle")
+        _m_set_local_scl = _xf_td:get_method("set_LocalScale")
+    end
+end)
+
 function ObjectExplorer.setup(deps)
     ControlPanel = deps.ControlPanel
     CoreFunctions = deps.CoreFunctions
@@ -85,23 +98,161 @@ local function get_type_meta(td)
 end
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- Transform Inspector (grid layout)
+-- Transform Inspector (using individual drag_float — REFramework compatible)
 -- ═══════════════════════════════════════════════════════════════════════════
 
-local function draw_vec3_row(label, vec, setter, uid)
+-- Track which GOs have been forced to dynamic mesh (avoid re-doing every drag)
+local _forced_dynamic = {}  -- [go_address] = true
+local _mesh_rt = nil  -- cached sdk.typeof for via.render.Mesh
+
+--- Force a single GO's mesh to dynamic (if it has one)
+local function force_mesh_on_go(go)
+    if not go then return end
+    pcall(function()
+        if not _mesh_rt then _mesh_rt = sdk.typeof("via.render.Mesh") end
+        if not _mesh_rt then return end
+        local mesh = go:call("getComponent(System.Type)", _mesh_rt)
+        if not mesh then return end
+        pcall(function() mesh:call("set_ForceDynamicMesh", true) end)
+        pcall(function() mesh:call("set_StaticMesh", false) end)
+    end)
+end
+
+--- Walk the transform hierarchy and force all descendant meshes to dynamic
+local function force_children_dynamic(xf, depth)
+    if not xf or depth > 5 then return end  -- max 5 levels deep
+    pcall(function()
+        local child = xf:call("get_Child")
+        local count = 0
+        while child and count < 50 do
+            count = count + 1
+            pcall(function()
+                local child_go = child:call("get_GameObject")
+                if child_go then force_mesh_on_go(child_go) end
+            end)
+            force_children_dynamic(child, depth + 1)  -- recurse
+            local next_sib = nil
+            pcall(function() next_sib = child:call("get_Next") end)
+            child = next_sib
+        end
+    end)
+end
+
+--- Force a GameObject + all its children to have dynamic meshes
+local function force_dynamic_for_go(go)
+    if not go then return end
+    local addr = 0
+    pcall(function() addr = go:get_address() end)
+    if addr ~= 0 and _forced_dynamic[addr] then return end -- already done
+    _forced_dynamic[addr] = true
+
+    -- Force mesh on this GO
+    force_mesh_on_go(go)
+
+    -- Walk ALL children and force their meshes too
+    pcall(function()
+        local xf = go:call("get_Transform")
+        if xf then force_children_dynamic(xf, 0) end
+    end)
+
+    -- CharacterController: warp
+    pcall(function()
+        local rt = sdk.typeof("via.physics.CharacterController")
+        if not rt then return end
+        local cc = go:call("getComponent(System.Type)", rt)
+        if cc then pcall(function() cc:call("warp") end) end
+    end)
+
+    -- Colliders: force non-static
+    pcall(function()
+        local rt = sdk.typeof("via.physics.Colliders")
+        if not rt then return end
+        local col = go:call("getComponent(System.Type)", rt)
+        if col then
+            pcall(function() col:call("set_Static", false) end)
+            pcall(function() col:call("updatePose") end)
+        end
+    end)
+end
+
+--- Draw an editable Vec3 row using 3 separate drag_float (REFramework compatible)
+--- Uses sdk.call_native_func to bypass gravity gun transform intercept hooks
+--- When changed, also forces mesh dynamic so visual updates happen
+local function draw_vec3_row(label, vec, method_name, xf, uid, speed, go)
     if not vec then return end
+    speed = speed or 0.05
     imgui.text_colored(label, 0xFF888888)
-    imgui.same_line()
-    local changed, nv = imgui.drag_float3("##" .. uid, {vec.x, vec.y, vec.z}, 0.01)
-    if changed and setter then
-        pcall(function() setter(Vector3f.new(nv[1], nv[2], nv[3])) end)
+    local px, py, pz = vec.x, vec.y, vec.z
+    local cx, vx = imgui.drag_float("X##" .. uid, px, speed, -99999, 99999, "%.3f")
+    local cy, vy = imgui.drag_float("Y##" .. uid, py, speed, -99999, 99999, "%.3f")
+    local cz, vz = imgui.drag_float("Z##" .. uid, pz, speed, -99999, 99999, "%.3f")
+    if (cx or cy or cz) and method_name and xf and _xf_td then
+        local nx = cx and vx or px
+        local ny = cy and vy or py
+        local nz = cz and vz or pz
+        -- Force mesh dynamic on first edit so the object visually moves
+        if go then force_dynamic_for_go(go) end
+        pcall(sdk.call_native_func, xf, _xf_td, method_name, Vector3f.new(nx, ny, nz))
+        -- After parent move: force ALL child meshes + physics to follow
+        if go then
+            pcall(function()
+                if not _mesh_rt then _mesh_rt = sdk.typeof("via.render.Mesh") end
+                local rbs_rt = sdk.typeof("via.dynamics.RigidBodySet")
+                local col_rt = sdk.typeof("via.physics.Colliders")
+
+                local function update_children(parent_xf)
+                    local child = parent_xf:call("get_Child")
+                    while child do
+                        pcall(function()
+                            local cgo = child:call("get_GameObject")
+                            if cgo then
+                                -- 1. Mesh: ForceWarp + ForceDynamic
+                                if _mesh_rt then
+                                    local mesh = cgo:call("getComponent(System.Type)", _mesh_rt)
+                                    if mesh then
+                                        pcall(function() mesh:call("set_ForceWarp", true) end)
+                                        pcall(function() mesh:call("set_ForceDynamicMesh", true) end)
+                                        pcall(function() mesh:call("set_StaticMesh", false) end)
+                                    end
+                                end
+                                -- 2. RigidBodySet: disable so physics stops fighting us
+                                if rbs_rt then
+                                    local rbs = cgo:call("getComponent(System.Type)", rbs_rt)
+                                    if rbs then
+                                        pcall(function() rbs:call("set_Enabled", false) end)
+                                    end
+                                end
+                                -- 3. Colliders: force non-static + updatePose
+                                if col_rt then
+                                    local col = cgo:call("getComponent(System.Type)", col_rt)
+                                    if col then
+                                        pcall(function() col:call("set_Static", false) end)
+                                        pcall(function() col:call("updatePose") end)
+                                    end
+                                end
+                            end
+                            -- 4. Re-write child LocalPosition → triggers world matrix recalc
+                            pcall(function()
+                                local lp = child:call("get_LocalPosition")
+                                if lp then pcall(sdk.call_native_func, child, _xf_td, "set_LocalPosition", lp) end
+                            end)
+                        end)
+                        pcall(function() update_children(child) end)
+                        local ns = nil
+                        pcall(function() ns = child:call("get_Next") end)
+                        child = ns
+                    end
+                end
+                update_children(xf)
+            end)
+        end
     end
 end
 
+--- Draw a read-only Vec4 row (quaternion)
 local function draw_vec4_row(label, x, y, z, w, uid)
     imgui.text_colored(label, 0xFF888888)
-    imgui.same_line()
-    imgui.drag_float4("##" .. uid, {x, y, z, w}, 0.01)
+    imgui.text(string.format("  %.4f  %.4f  %.4f  %.4f", x, y, z, w))
 end
 
 local function draw_transform_inspector(xf, uid, go)
@@ -109,60 +260,329 @@ local function draw_transform_inspector(xf, uid, go)
     uid = uid or "xf"
     if not imgui.tree_node("Transform##xf_" .. uid) then return end
 
+    -- ═══ BRUTE FORCE MOVE TEST PANEL ═══
+    -- Each button moves the object +1 on Y using a different strategy
+    if go and imgui.tree_node("## Move Tests +1Y##bf_" .. uid) then
+        imgui.text_colored("Click each to move +1Y. Watch game to see which works.", 0xFFFFAA44)
+        local pos = nil
+        pcall(function() pos = xf:call("get_Position") end)
+        if pos then
+            imgui.text(string.format("Current: %.2f, %.2f, %.2f", pos.x, pos.y, pos.z))
+            local up = Vector3f.new(pos.x, pos.y + 1.0, pos.z)
+
+            -- Helper: get child mesh data
+            local function get_children()
+                local children = {}
+                pcall(function()
+                    local c = xf:call("get_Child")
+                    while c do
+                        local info = { xf = c }
+                        pcall(function() info.go = c:call("get_GameObject") end)
+                        if info.go then
+                            pcall(function() info.name = info.go:call("get_Name") end)
+                            pcall(function()
+                                if not _mesh_rt then _mesh_rt = sdk.typeof("via.render.Mesh") end
+                                info.mesh = info.go:call("getComponent(System.Type)", _mesh_rt)
+                            end)
+                            pcall(function()
+                                local rt = sdk.typeof("via.dynamics.RigidBodySet")
+                                if rt then info.rbs = info.go:call("getComponent(System.Type)", rt) end
+                            end)
+                            pcall(function()
+                                local rt = sdk.typeof("via.physics.Colliders")
+                                if rt then info.col = info.go:call("getComponent(System.Type)", rt) end
+                            end)
+                            pcall(function()
+                                local rt = sdk.typeof("app.GimmickDynamicPrefabController")
+                                if rt then info.gdpc = info.go:call("getComponent(System.Type)", rt) end
+                            end)
+                            pcall(function()
+                                local rt = sdk.typeof("app.DynamicsPropObject")
+                                if rt then info.dpo = info.go:call("getComponent(System.Type)", rt) end
+                            end)
+                        end
+                        table.insert(children, info)
+                        local ns = nil
+                        pcall(function() ns = c:call("get_Next") end)
+                        c = ns
+                    end
+                end)
+                return children
+            end
+
+            imgui.separator()
+            imgui.text_colored("--- PARENT ONLY ---", 0xFF88FF88)
+
+            -- T1: Parent set_Position only
+            if imgui.button("T1: Parent set_Position##" .. uid) then
+                pcall(sdk.call_native_func, xf, _xf_td, "set_Position", up)
+                log.info("[BF] T1: set parent Position +1Y")
+            end
+
+            -- T2: Parent set_Position + set_LocalPosition
+            if imgui.button("T2: Parent set_Position + set_LocalPosition##" .. uid) then
+                pcall(sdk.call_native_func, xf, _xf_td, "set_Position", up)
+                pcall(function()
+                    local lp = xf:call("get_LocalPosition")
+                    if lp then
+                        pcall(sdk.call_native_func, xf, _xf_td, "set_LocalPosition",
+                            Vector3f.new(lp.x, lp.y + 1.0, lp.z))
+                    end
+                end)
+                log.info("[BF] T2: set parent Position + LocalPosition +1Y")
+            end
+
+            imgui.separator()
+            imgui.text_colored("--- CHILD DIRECT MOVE ---", 0xFF88FF88)
+
+            -- T3: Move each child's world Position directly
+            if imgui.button("T3: Move CHILDREN set_Position +1Y##" .. uid) then
+                for _, ch in ipairs(get_children()) do
+                    pcall(function()
+                        local cp = ch.xf:call("get_Position")
+                        if cp then
+                            pcall(sdk.call_native_func, ch.xf, _xf_td, "set_Position",
+                                Vector3f.new(cp.x, cp.y + 1.0, cp.z))
+                        end
+                    end)
+                end
+                log.info("[BF] T3: moved all children +1Y via set_Position")
+            end
+
+            -- T4: Move each child's LocalPosition
+            if imgui.button("T4: Move CHILDREN set_LocalPosition +1Y##" .. uid) then
+                for _, ch in ipairs(get_children()) do
+                    pcall(function()
+                        local lp = ch.xf:call("get_LocalPosition")
+                        if lp then
+                            pcall(sdk.call_native_func, ch.xf, _xf_td, "set_LocalPosition",
+                                Vector3f.new(lp.x, lp.y + 1.0, lp.z))
+                        end
+                    end)
+                end
+                log.info("[BF] T4: moved all children +1Y via set_LocalPosition")
+            end
+
+            imgui.separator()
+            imgui.text_colored("--- MESH FLAGS ---", 0xFF88FF88)
+
+            -- T5: ForceWarp on children
+            if imgui.button("T5: Children set_ForceWarp(true)##" .. uid) then
+                for _, ch in ipairs(get_children()) do
+                    if ch.mesh then pcall(function() ch.mesh:call("set_ForceWarp", true) end) end
+                end
+                log.info("[BF] T5: ForceWarp on children")
+            end
+
+            -- T6: ForceDynamic + clear Static on children
+            if imgui.button("T6: Children ForceDynamic + !Static##" .. uid) then
+                for _, ch in ipairs(get_children()) do
+                    if ch.mesh then
+                        pcall(function() ch.mesh:call("set_ForceDynamicMesh", true) end)
+                        pcall(function() ch.mesh:call("set_StaticMesh", false) end)
+                    end
+                end
+                log.info("[BF] T6: ForceDynamic + !Static on children")
+            end
+
+            imgui.separator()
+            imgui.text_colored("--- DISABLE PHYSICS ---", 0xFF88FF88)
+
+            -- T7: Disable RigidBodySet on children
+            if imgui.button("T7: Disable RigidBodySet##" .. uid) then
+                for _, ch in ipairs(get_children()) do
+                    if ch.rbs then pcall(function() ch.rbs:call("set_Enabled", false) end) end
+                end
+                log.info("[BF] T7: disabled RigidBodySet on children")
+            end
+
+            -- T8: Disable GimmickDynamicPrefabController
+            if imgui.button("T8: Disable GimmickDynamicPrefabCtrl##" .. uid) then
+                for _, ch in ipairs(get_children()) do
+                    if ch.gdpc then pcall(function() ch.gdpc:call("set_Enabled", false) end) end
+                end
+                log.info("[BF] T8: disabled GimmickDynamicPrefabController")
+            end
+
+            -- T9: Disable DynamicsPropObject
+            if imgui.button("T9: Disable DynamicsPropObject##" .. uid) then
+                for _, ch in ipairs(get_children()) do
+                    if ch.dpo then pcall(function() ch.dpo:call("set_Enabled", false) end) end
+                end
+                log.info("[BF] T9: disabled DynamicsPropObject")
+            end
+
+            -- T10: Disable Colliders
+            if imgui.button("T10: Disable Colliders##" .. uid) then
+                for _, ch in ipairs(get_children()) do
+                    if ch.col then pcall(function() ch.col:call("set_Enabled", false) end) end
+                end
+                log.info("[BF] T10: disabled Colliders")
+            end
+
+            imgui.separator()
+            imgui.text_colored("--- COMBOS ---", 0xFF88FF88)
+
+            -- T11: Disable ALL physics + move parent
+            if imgui.button("T11: Kill physics + Parent +1Y##" .. uid) then
+                for _, ch in ipairs(get_children()) do
+                    if ch.rbs then pcall(function() ch.rbs:call("set_Enabled", false) end) end
+                    if ch.gdpc then pcall(function() ch.gdpc:call("set_Enabled", false) end) end
+                    if ch.dpo then pcall(function() ch.dpo:call("set_Enabled", false) end) end
+                    if ch.col then pcall(function() ch.col:call("set_Enabled", false) end) end
+                end
+                pcall(sdk.call_native_func, xf, _xf_td, "set_Position", up)
+                log.info("[BF] T11: killed ALL physics + parent +1Y")
+            end
+
+            -- T12: Disable ALL physics + move children directly
+            if imgui.button("T12: Kill physics + Children +1Y##" .. uid) then
+                for _, ch in ipairs(get_children()) do
+                    if ch.rbs then pcall(function() ch.rbs:call("set_Enabled", false) end) end
+                    if ch.gdpc then pcall(function() ch.gdpc:call("set_Enabled", false) end) end
+                    if ch.dpo then pcall(function() ch.dpo:call("set_Enabled", false) end) end
+                    if ch.col then pcall(function() ch.col:call("set_Enabled", false) end) end
+                end
+                for _, ch in ipairs(get_children()) do
+                    pcall(function()
+                        local cp = ch.xf:call("get_Position")
+                        if cp then
+                            pcall(sdk.call_native_func, ch.xf, _xf_td, "set_Position",
+                                Vector3f.new(cp.x, cp.y + 1.0, cp.z))
+                        end
+                    end)
+                end
+                log.info("[BF] T12: killed physics + moved children +1Y")
+            end
+
+            -- T13: Kill physics + ForceWarp + ForceDynamic + move parent
+            if imgui.button("T13: EVERYTHING + Parent +1Y##" .. uid) then
+                for _, ch in ipairs(get_children()) do
+                    if ch.rbs then pcall(function() ch.rbs:call("set_Enabled", false) end) end
+                    if ch.gdpc then pcall(function() ch.gdpc:call("set_Enabled", false) end) end
+                    if ch.dpo then pcall(function() ch.dpo:call("set_Enabled", false) end) end
+                    if ch.col then pcall(function() ch.col:call("set_Enabled", false) end) end
+                    if ch.mesh then
+                        pcall(function() ch.mesh:call("set_ForceWarp", true) end)
+                        pcall(function() ch.mesh:call("set_ForceDynamicMesh", true) end)
+                        pcall(function() ch.mesh:call("set_StaticMesh", false) end)
+                    end
+                end
+                pcall(sdk.call_native_func, xf, _xf_td, "set_Position", up)
+                log.info("[BF] T13: EVERYTHING + parent +1Y")
+            end
+
+            -- T14: EVERYTHING + move children directly
+            if imgui.button("T14: EVERYTHING + Children +1Y##" .. uid) then
+                for _, ch in ipairs(get_children()) do
+                    if ch.rbs then pcall(function() ch.rbs:call("set_Enabled", false) end) end
+                    if ch.gdpc then pcall(function() ch.gdpc:call("set_Enabled", false) end) end
+                    if ch.dpo then pcall(function() ch.dpo:call("set_Enabled", false) end) end
+                    if ch.col then pcall(function() ch.col:call("set_Enabled", false) end) end
+                    if ch.mesh then
+                        pcall(function() ch.mesh:call("set_ForceWarp", true) end)
+                        pcall(function() ch.mesh:call("set_ForceDynamicMesh", true) end)
+                        pcall(function() ch.mesh:call("set_StaticMesh", false) end)
+                    end
+                end
+                for _, ch in ipairs(get_children()) do
+                    pcall(function()
+                        local cp = ch.xf:call("get_Position")
+                        if cp then
+                            pcall(sdk.call_native_func, ch.xf, _xf_td, "set_Position",
+                                Vector3f.new(cp.x, cp.y + 1.0, cp.z))
+                        end
+                    end)
+                end
+                log.info("[BF] T14: EVERYTHING + children +1Y")
+            end
+
+            -- T15: Move parent + children together
+            if imgui.button("T15: Parent +1Y AND Children +1Y##" .. uid) then
+                pcall(sdk.call_native_func, xf, _xf_td, "set_Position", up)
+                for _, ch in ipairs(get_children()) do
+                    pcall(function()
+                        local cp = ch.xf:call("get_Position")
+                        if cp then
+                            pcall(sdk.call_native_func, ch.xf, _xf_td, "set_Position",
+                                Vector3f.new(cp.x, cp.y + 1.0, cp.z))
+                        end
+                    end)
+                end
+                log.info("[BF] T15: parent +1Y AND children +1Y")
+            end
+
+            imgui.separator()
+            imgui.text_colored("--- TOGGLE MESH ---", 0xFF88FF88)
+
+            -- T16: Toggle mesh enabled off then on
+            if imgui.button("T16: Toggle mesh Enabled off/on##" .. uid) then
+                for _, ch in ipairs(get_children()) do
+                    if ch.mesh then
+                        pcall(function() ch.mesh:call("set_Enabled", false) end)
+                        pcall(function() ch.mesh:call("set_Enabled", true) end)
+                    end
+                end
+                log.info("[BF] T16: toggled mesh enabled")
+            end
+
+            -- T17: Toggle entire child GO draw off/on
+            if imgui.button("T17: Toggle child GO Draw off/on##" .. uid) then
+                for _, ch in ipairs(get_children()) do
+                    if ch.go then
+                        pcall(function() ch.go:call("set_Draw", false) end)
+                        pcall(function() ch.go:call("set_Draw", true) end)
+                    end
+                end
+                log.info("[BF] T17: toggled child Draw")
+            end
+        end
+        imgui.tree_pop()
+    end
+
     -- Position (world, editable)
     pcall(function()
         local wp = xf:call("get_Position")
-        if wp then
-            draw_vec3_row("Position    ", wp,
-                function(v) xf:call("set_Position", v) end, "pos_" .. uid)
-        end
+        if wp then draw_vec3_row("Position", wp, "set_Position", xf, "pos_" .. uid, 0.1, go) end
     end)
 
-    -- Rotation quaternion
+    -- Rotation quaternion (read-only)
     pcall(function()
         local r = xf:call("get_Rotation")
-        if r then draw_vec4_row("Rotation    ", r.x, r.y, r.z, r.w, "rot_" .. uid) end
+        if r then draw_vec4_row("Rotation", r.x, r.y, r.z, r.w, "rot_" .. uid) end
     end)
 
-    -- Scale
+    -- Scale (read-only)
     pcall(function()
         local s = xf:call("get_Scale")
-        if s then draw_vec3_row("Scale       ", s, nil, "scl_" .. uid) end
+        if s then
+            imgui.text_colored("Scale", 0xFF888888)
+            imgui.text(string.format("  %.3f  %.3f  %.3f", s.x, s.y, s.z))
+        end
     end)
 
     -- Local Euler Angles (editable)
     pcall(function()
         local le = xf:call("get_LocalEulerAngle")
-        if le then
-            draw_vec3_row("LocalEuler  ", le,
-                function(v) xf:call("set_LocalEulerAngle", v) end, "le_" .. uid)
-        end
+        if le then draw_vec3_row("LocalEuler", le, "set_LocalEulerAngle", xf, "le_" .. uid, 1.0, go) end
     end)
 
     -- Local Position (editable)
     pcall(function()
         local lp = xf:call("get_LocalPosition")
-        if lp then
-            draw_vec3_row("LocalPos    ", lp,
-                function(v) xf:call("set_LocalPosition", v) end, "lp_" .. uid)
-        end
+        if lp then draw_vec3_row("LocalPos", lp, "set_LocalPosition", xf, "lp_" .. uid, 0.1, go) end
     end)
 
-    -- Local Rotation
+    -- Local Rotation (read-only)
     pcall(function()
         local lr = xf:call("get_LocalRotation")
-        if lr then
-            draw_vec4_row("LocalRot    ", lr.x, lr.y, lr.z, lr.w, "lr_" .. uid)
-        end
+        if lr then draw_vec4_row("LocalRot", lr.x, lr.y, lr.z, lr.w, "lr_" .. uid) end
     end)
 
     -- Local Scale (editable)
     pcall(function()
         local ls = xf:call("get_LocalScale")
-        if ls then
-            draw_vec3_row("LocalScale  ", ls,
-                function(v) xf:call("set_LocalScale", v) end, "ls_" .. uid)
-        end
+        if ls then draw_vec3_row("LocalScale", ls, "set_LocalScale", xf, "ls_" .. uid, 0.01, go) end
     end)
 
     -- WorldMatrix / LocalMatrix

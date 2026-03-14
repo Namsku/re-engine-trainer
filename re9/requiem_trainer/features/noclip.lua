@@ -1,4 +1,4 @@
-﻿-- ═══════════════════════════════════════════════════════════════════════════
+-- ═══════════════════════════════════════════════════════════════════════════
 -- Requiem Trainer — NoClip Sub-Module
 -- Camera-relative movement, anti-death/fall hooks, transform manipulation
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -378,8 +378,8 @@ local function noclip_tick()
     -- Apply position
     nc_set_pos(nc.pos)
 
-    -- Sync character rotation to camera yaw
-    if nc.rot then
+    -- Sync character rotation to camera yaw (optional)
+    if C.noclip_sync_rotation and nc.rot then
         local yaw = nc_quat_yaw(nc.rot) + math.rad(C.noclip_yaw_offset)
         nc_set_rot(nc_quat_from_yaw(yaw))
     end

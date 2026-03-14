@@ -193,7 +193,10 @@ if TableUtils then
 end
 
 -- UI tabs
-if ObjectsTab then EMV.render_objects_tab = ObjectsTab.render end
+if ObjectsTab then
+    EMV.render_objects_tab = ObjectsTab.render
+    EMV.objects_background_update = ObjectsTab.background_update
+end
 if SpawnerTab then EMV.render_spawner_tab = SpawnerTab.render end
 if ViewerTab  then EMV.render_viewer_tab  = ViewerTab.render end
 if MethodInspector then EMV.render_method_inspector = MethodInspector.render end

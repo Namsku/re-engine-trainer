@@ -13,6 +13,16 @@
 local ObjectsTab = {}
 local CoreFunctions, ControlPanel, ImguiHelpers, ObjectExplorer
 
+-- Cached via.Transform method handles (Native Call Trap workaround)
+local _xf_td, _m_set_pos, _m_set_local_scl
+pcall(function()
+    _xf_td = sdk.find_type_definition("via.Transform")
+    if _xf_td then
+        _m_set_pos       = _xf_td:get_method("set_Position")
+        _m_set_local_scl = _xf_td:get_method("set_LocalScale")
+    end
+end)
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Helpers — delegate to trainer cache when available, fallback to raw SDK
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -53,11 +63,11 @@ local state = {
     filtered      = {},
     total         = 0,
     search_text   = "",
-    max_distance  = 100,
+    max_distance  = 15,
     sort_by_dist  = true,
     filter_idx    = 1,
     last_scan     = 0,
-    scan_interval = 3.0,
+    scan_interval = 2.0,
     needs_rescan  = true,
     scan_info     = "...",
     hide_static   = true,
@@ -105,7 +115,33 @@ function ObjectsTab.setup(deps)
     if T then
         _trainer_mgr = T.mgr
         _trainer_ppos = T.ppos
+        -- Load persisted state from config
+        local C = T.C
+        if C then
+            if C.obj_enabled ~= nil then state.enabled = C.obj_enabled end
+            if C.obj_show_overlay ~= nil then state.show_overlay = C.obj_show_overlay end
+            if C.obj_max_distance then state.max_distance = C.obj_max_distance end
+            if C.obj_sort_by_dist ~= nil then state.sort_by_dist = C.obj_sort_by_dist end
+            if C.obj_filter_idx then state.filter_idx = C.obj_filter_idx end
+            if C.obj_hide_static ~= nil then state.hide_static = C.obj_hide_static end
+            if C.obj_scan_interval then state.scan_interval = C.obj_scan_interval end
+        end
     end
+end
+
+-- Save current state to config
+local function save_obj_config()
+    local T = _G.__REQUIEM_T
+    if not T or not T.C then return end
+    local C = T.C
+    C.obj_enabled = state.enabled
+    C.obj_show_overlay = state.show_overlay
+    C.obj_max_distance = state.max_distance
+    C.obj_sort_by_dist = state.sort_by_dist
+    C.obj_filter_idx = state.filter_idx
+    C.obj_hide_static = state.hide_static
+    C.obj_scan_interval = state.scan_interval
+    if T.cfg_save then pcall(T.cfg_save) end
 end
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -340,40 +376,75 @@ end
 
 local function scan_gimmicks()
     local out = {}
+    local seen = {}  -- track seen addresses to avoid duplicates
+
+    -- Part 1: GimmickManager database
     local gm = mgr("app.GimmickManager")
-    if not gm then return out, 0, "GimmickManager not found" end
-
-    local db = gm:get_field("_GimmickCoreDB")
-    if not db then return out, 0, "no _GimmickCoreDB" end
-
-    local entries = db:get_field("_entries")
-    if not entries then return out, 0, "no entries" end
-
-    local ok, size = pcall(entries.call, entries, "get_size")
-    if not ok or not size or size <= 0 then return out, 0, "0 gimmicks" end
-
-    for i = 0, math.min(size - 1, 500) do
-        pcall(function()
-            local e = entries:call("get_element", i)
-            if not e then return end
-            local core = e:get_field("value")
-            if not core then return end
-            local go = core:call("get_GameObject")
-            if not go then return end
-            local entry = make_entry(go)
-            if not entry then return end
-
-            -- Add done status
-            pcall(function()
-                local done = core:get_field("_IsDone")
-                if done then entry.name = entry.name .. " [DONE]" end
-            end)
-
-            out[#out + 1] = entry
-        end)
+    if gm then
+        local db = gm:get_field("_GimmickCoreDB")
+        if db then
+            local entries = db:get_field("_entries")
+            if entries then
+                local ok, size = pcall(entries.call, entries, "get_size")
+                if ok and size and size > 0 then
+                    for i = 0, math.min(size - 1, 500) do
+                        pcall(function()
+                            local e = entries:call("get_element", i)
+                            if not e then return end
+                            local core = e:get_field("value")
+                            if not core then return end
+                            local go = core:call("get_GameObject")
+                            if not go then return end
+                            local addr = go:get_address()
+                            if seen[addr] then return end
+                            seen[addr] = true
+                            local entry = make_entry(go)
+                            if not entry then return end
+                            pcall(function()
+                                local done = core:get_field("_IsDone")
+                                if done then entry.name = entry.name .. " [DONE]" end
+                            end)
+                            out[#out + 1] = entry
+                        end)
+                    end
+                end
+            end
+        end
     end
 
-    return out, size, size .. " gimmick entries"
+    -- Part 2: Walk all transforms for objects starting with "Gm"
+    local gm_count = 0
+    pcall(function()
+        local scene = CoreFunctions and CoreFunctions.get_scene() or nil
+        if not scene then return end
+        local xf = scene:call("get_FirstTransform")
+        local walked = 0
+        while xf and walked < 8000 do
+            walked = walked + 1
+            pcall(function()
+                local go = xf:call("get_GameObject")
+                if not go then return end
+                local addr = go:get_address()
+                if seen[addr] then return end
+                local name = nil
+                pcall(function() name = tostring(go:call("get_Name")) end)
+                if name and name:sub(1, 2) == "Gm" then
+                    seen[addr] = true
+                    local entry = make_entry(go, name)
+                    if entry then
+                        out[#out + 1] = entry
+                        gm_count = gm_count + 1
+                    end
+                end
+            end)
+            local next_xf = nil
+            pcall(function() next_xf = xf:call("get_Next") end)
+            xf = next_xf
+        end
+    end)
+
+    local db_count = #out - gm_count
+    return out, #out, db_count .. " DB + " .. gm_count .. " Gm* = " .. #out .. " gimmicks"
 end
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -489,14 +560,16 @@ function ObjectsTab._scan()
 
     -- Export overlay data to EMV global (read by rendering.lua)
     if _G.EMV then
-        _G.EMV._overlay_cfg = { enabled = state.show_overlay }
+        local T = _G.__REQUIEM_T
+        local obj_style = (T and T.C and T.C.obj_overlay_style) or 5
+        _G.EMV._overlay_cfg = { enabled = state.show_overlay, style = obj_style }
         if state.show_overlay then
             local overlay = {}
             for _, e in ipairs(objects) do
                 if e.has_pos then
                     overlay[#overlay + 1] = {
                         name = e.name, x = e.x, y = e.y, z = e.z, dist = e.dist,
-                        guid = e.guid, folder_path = e.folder_path,
+                        guid = e.guid, folder_path = e.folder_path, gameobj = e.gameobj,
                     }
                 end
             end
@@ -505,6 +578,17 @@ function ObjectsTab._scan()
             _G.EMV._overlay_objects = {}
         end
     end
+end
+
+--- Background update: called from frame loop to keep overlay data fresh
+--- even when the Objects tab UI is not visible.
+function ObjectsTab.background_update()
+    if not state.enabled or not state.show_overlay then return end
+    if state.any_open then return end  -- don't rescan while user is inspecting an object
+    local now = os.clock()
+    if (now - state.last_scan) < state.scan_interval then return end
+    pcall(ObjectsTab._scan)
+    state.last_scan = now
 end
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -550,6 +634,7 @@ function ObjectsTab.render()
             state.objects = {}; state.filtered = {}
             if _G.EMV then _G.EMV._overlay_objects = {}; _G.EMV._overlay_cfg = { enabled = false } end
         end
+        save_obj_config()
     end
     if not state.enabled then
         imgui.text_colored("Enable to scan scene objects (uses CPU/memory)", 0xFF888888)
@@ -557,7 +642,8 @@ function ObjectsTab.render()
     end
 
     local now = os.clock()
-    if state.needs_rescan or (now - state.last_scan) > state.scan_interval then
+    local skip_auto = state.any_open  -- don't rescan while user has a node expanded
+    if state.needs_rescan or (not skip_auto and (now - state.last_scan) > state.scan_interval) then
         pcall(ObjectsTab._scan)
         state.needs_rescan = false
         state.last_scan = now
@@ -576,26 +662,30 @@ function ObjectsTab.render()
             if state.filter_idx ~= i then
                 state.filter_idx = i
                 state.needs_rescan = true
+                save_obj_config()
             end
         end
         if sel then imgui.pop_style_color(1) end
     end
 
     local dc, dv = imgui.drag_float("Max Dist##od", state.max_distance, 1.0, 0, 5000)
-    if dc then state.max_distance = math.max(0, dv); state.needs_rescan = true end
+    if dc then state.max_distance = math.max(0, dv); state.needs_rescan = true; save_obj_config() end
     imgui.same_line(); imgui.text("(0=all)")
 
     local sc, st = imgui.input_text("Search##obj_s", state.search_text, 256)
     if sc then state.search_text = st; ObjectsTab._apply_search() end
 
     local sbc, sbv = imgui.checkbox("Sort by distance", state.sort_by_dist)
-    if sbc then state.sort_by_dist = sbv; ObjectsTab._apply_search() end
+    if sbc then state.sort_by_dist = sbv; ObjectsTab._apply_search(); save_obj_config() end
 
     if CATEGORIES[state.filter_idx].scan == "all" then
         imgui.same_line()
         local hc, hv = imgui.checkbox("Hide static", state.hide_static)
-        if hc then state.hide_static = hv; state.needs_rescan = true end
+        if hc then state.hide_static = hv; state.needs_rescan = true; save_obj_config() end
     end
+
+    local sic, siv = imgui.drag_float("Scan Interval (s)##osi", state.scan_interval, 0.01, 0.01, 10.0)
+    if sic then state.scan_interval = math.max(0.01, siv); save_obj_config() end
 
     -- Overlay toggle
     local oc, ov = imgui.checkbox("3D Overlay", state.show_overlay)
@@ -603,10 +693,24 @@ function ObjectsTab.render()
         state.show_overlay = ov
         -- Update immediately
         if _G.EMV then
-            _G.EMV._overlay_cfg = { enabled = ov }
+            _G.EMV._overlay_cfg = { enabled = ov, style = state.overlay_style or 5 }
             if not ov then _G.EMV._overlay_objects = {} end
         end
         if ov then state.needs_rescan = true end
+        save_obj_config()
+    end
+    if state.show_overlay then
+        imgui.same_line()
+        local OBJ_STYLES = {"1: Cylinder", "2: Diamond", "3: Beacon", "4: Minimal", "5: Text"}
+        local T = _G.__REQUIEM_T
+        local C = T and T.C
+        local cur_style = (C and C.obj_overlay_style) or 5
+        local sc, sv = imgui.combo("Style##obj_style", cur_style, OBJ_STYLES)
+        if sc and C then
+            C.obj_overlay_style = sv
+            if _G.EMV then _G.EMV._overlay_cfg = { enabled = true, style = sv } end
+            if T and T.cfg_save then pcall(T.cfg_save) end
+        end
     end
 
     imgui.separator()
@@ -616,6 +720,7 @@ function ObjectsTab.render()
     imgui.spacing()
 
     local max_show = 300
+    state.any_open = false
     for i = 1, math.min(#list, max_show) do
         if list[i] then pcall(ObjectsTab._draw_entry, list[i], i) end
     end
@@ -631,6 +736,7 @@ function ObjectsTab._draw_entry(e, idx)
     local dist_str = e.dist and string.format(" [%.1fm]", e.dist) or ""
     local label = (e.name or "?") .. dist_str .. "##e" .. sid
     if not imgui.tree_node(label) then return end
+    state.any_open = true  -- pause auto-rescan while any node is expanded
 
     -- Use the full Object Explorer if available
     if ObjectExplorer and ObjectExplorer.explore_gameobj then
@@ -705,7 +811,7 @@ function ObjectsTab._draw_go(go, idx)
 end
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- Transform (editable position + scale)
+-- Transform (editable position + scale) — fallback when ObjectExplorer unavailable
 -- ═══════════════════════════════════════════════════════════════════════════
 
 function ObjectsTab._draw_xf(go, idx)
@@ -715,15 +821,33 @@ function ObjectsTab._draw_xf(go, idx)
         pcall(function()
             local p = xf:call("get_Position")
             if p then
-                local c, nv = imgui.drag_float3("Pos##xfp" .. idx, {p.x, p.y, p.z}, 0.1)
-                if c then pcall(xf.call, xf, "set_Position", Vector3f.new(nv[1], nv[2], nv[3])) end
+                imgui.text_colored("Position", 0xFF88AACC)
+                local px, py, pz = p.x, p.y, p.z
+                local cx, vx = imgui.drag_float("X##xfp" .. idx, px, 0.1, -99999, 99999, "%.3f")
+                local cy, vy = imgui.drag_float("Y##xfp" .. idx, py, 0.1, -99999, 99999, "%.3f")
+                local cz, vz = imgui.drag_float("Z##xfp" .. idx, pz, 0.1, -99999, 99999, "%.3f")
+                if (cx or cy or cz) and _xf_td then
+                    local nx = cx and vx or px
+                    local ny = cy and vy or py
+                    local nz = cz and vz or pz
+                    pcall(sdk.call_native_func, xf, _xf_td, "set_Position", Vector3f.new(nx, ny, nz))
+                end
             end
         end)
         pcall(function()
             local s = xf:call("get_LocalScale")
             if s then
-                local c, nv = imgui.drag_float3("Scale##xfs" .. idx, {s.x, s.y, s.z}, 0.01)
-                if c then pcall(xf.call, xf, "set_LocalScale", Vector3f.new(nv[1], nv[2], nv[3])) end
+                imgui.text_colored("Scale", 0xFF88AACC)
+                local sx, sy, sz = s.x, s.y, s.z
+                local cx, vx = imgui.drag_float("X##xfs" .. idx, sx, 0.01, -99999, 99999, "%.3f")
+                local cy, vy = imgui.drag_float("Y##xfs" .. idx, sy, 0.01, -99999, 99999, "%.3f")
+                local cz, vz = imgui.drag_float("Z##xfs" .. idx, sz, 0.01, -99999, 99999, "%.3f")
+                if (cx or cy or cz) and _xf_td then
+                    local nx = cx and vx or sx
+                    local ny = cy and vy or sy
+                    local nz = cz and vz or sz
+                    pcall(sdk.call_native_func, xf, _xf_td, "set_LocalScale", Vector3f.new(nx, ny, nz))
+                end
             end
         end)
         pcall(function()
