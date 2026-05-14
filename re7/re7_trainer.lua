@@ -43,6 +43,7 @@ local R = {
     tick = 0, toasts = {}, enemies = {}, items = {}, spawners = {},
     player_hp = 0, player_max_hp = 0,
     player_pos = nil, player_rot = nil, scene_name = "", chapter = "",
+    loaded_scene = "",  -- from HarawataUtil / MapManager
     da_score = 0, rank = 0, difficulty = 0, area_name = "", room_id = 0, map_cat = 0, map_level = 0,
     dev_overlay_bottom = 0, damage_numbers = {},
 }
@@ -579,7 +580,7 @@ pcall(function()
 end)
 
 local emv_fn = loadfile(my_dir .. "re7_trainer/emv_engine/init.lua")
-if emv_fn then pcall(emv_fn) end
+if emv_fn then pcall(emv_fn, T) end
 local EMV = _G.EMV or {}
 
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -657,6 +658,9 @@ local function render_dev_overlay()
     if rot then
         info[#info + 1] = string.format(" Rot:  P %.1f  Y %.1f  R %.1f", rot.x, rot.y, rot.z)
     end
+    if R.loaded_scene ~= "" then
+        info[#info + 1] = " Scene:  " .. R.loaded_scene
+    end
     if R.chapter ~= "" then
         info[#info + 1] = " Chapter:  " .. R.chapter
     end
@@ -680,6 +684,7 @@ local function render_dev_overlay()
 
     for i, line in ipairs(info) do
         local col = (i == 1) and DC.TEXT_GREEN or DC.TEXT_WHITE
+        if line:sub(1, 6) == " Scene" then col = DC.TEXT_YELLOW end
         if line:sub(1, 5) == " Area" then col = DC.TEXT_GRAY end
         if line:sub(1, 8) == " Chapter" then col = DC.TEXT_YELLOW end
         if line:sub(1, 4) == " DA " then col = DC.TEXT_CYAN end
@@ -993,6 +998,30 @@ local function ui_objects()
     end
 end
 
+local function ui_inspector()
+    if EMV.render_method_inspector then
+        pcall(EMV.render_method_inspector)
+    else
+        imgui.text_colored("EMV Engine not loaded", 0xFFFF4444)
+    end
+end
+
+local function ui_spawner()
+    if EMV.render_spawner_tab then
+        pcall(EMV.render_spawner_tab)
+    else
+        imgui.text_colored("EMV Engine not loaded", 0xFFFF4444)
+    end
+end
+
+local function ui_viewer()
+    if EMV.render_viewer_tab then
+        pcall(EMV.render_viewer_tab)
+    else
+        imgui.text_colored("EMV Engine not loaded", 0xFFFF4444)
+    end
+end
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- UI — Overlay Tab
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -1042,9 +1071,12 @@ end
 -- ═══════════════════════════════════════════════════════════════════════════
 
 local TAB_DEFS = {
-    { name = "Player",  fn = ui_player },
-    { name = "Objects", fn = ui_objects },
-    { name = "Overlay", fn = ui_overlay },
+    { name = "Player",    fn = ui_player },
+    { name = "Objects",   fn = ui_objects },
+    { name = "Inspector", fn = ui_inspector },
+    { name = "Spawner",   fn = ui_spawner },
+    { name = "Viewer",    fn = ui_viewer },
+    { name = "Overlay",   fn = ui_overlay },
 }
 
 local trainer_visible = true
@@ -1083,7 +1115,10 @@ re.on_draw_ui(function()
             imgui.text_colored(("%d enemies"):format(#R.enemies), 0xFFFFAA44)
         end
 
-        if R.scene_name ~= "" then
+        if R.loaded_scene ~= "" then
+            imgui.same_line()
+            imgui.text_colored("  " .. R.loaded_scene, 0xFFFFDD88)
+        elseif R.scene_name ~= "" then
             imgui.same_line()
             imgui.text_colored("  " .. R.scene_name, 0xFF777777)
         end
@@ -1277,8 +1312,12 @@ end)
 -- ═══════════════════════════════════════════════════════════════════════════
 re.on_frame(function()
     R.tick = R.tick + 1
-    if EMV.process_deferred_calls then pcall(EMV.process_deferred_calls) end
+    -- EMV Engine per-frame hooks
     if EMV.process_on_frame_calls then pcall(EMV.process_on_frame_calls) end
+    if EMV.process_deferred_calls then pcall(EMV.process_deferred_calls) end
+    if EMV.ObjectCache then pcall(EMV.ObjectCache.sweep, EMV.ObjectCache) end
+    -- EMV Objects overlay background scan (self-throttled by scan_interval)
+    if EMV.objects_background_update then pcall(EMV.objects_background_update) end
 
     -- Noclip every frame
     if C.noclip then pcall(do_noclip) end
@@ -1302,7 +1341,33 @@ re.on_frame(function()
             pcall(function() R.rank = gm:call("getGameRank") or 0 end)
             pcall(function() R.difficulty = gm:get_field("GameDifficulty") or 0 end)
         end)
-        -- MapManager fields: Area Name, Room ID
+        -- HarawataUtil: try getCurrentChapterName (RE7 codename utility)
+        pcall(function()
+            local scene_str = nil
+            -- Approach 1: singleton
+            pcall(function()
+                local hu = sdk.get_managed_singleton("app.HarawataUtil")
+                if hu then
+                    local name = hu:call("getCurrentChapterName")
+                    if name and tostring(name) ~= "" then scene_str = tostring(name) end
+                end
+            end)
+            -- Approach 2: static call via type definition
+            if not scene_str then
+                pcall(function()
+                    local td = sdk.find_type_definition("app.HarawataUtil")
+                    if td then
+                        local method = td:get_method("getCurrentChapterName")
+                        if method then
+                            local name = method:call(nil)
+                            if name and tostring(name) ~= "" then scene_str = tostring(name) end
+                        end
+                    end
+                end)
+            end
+            R.loaded_scene = scene_str or ""
+        end)
+        -- MapManager fields: Area Name, Room ID, Scene Name
         pcall(function()
             local mm = sdk.get_managed_singleton("app.MapManager")
             if not mm then return end
@@ -1310,6 +1375,25 @@ re.on_frame(function()
                 local name = mm:call("getAreaName")
                 R.area_name = name and tostring(name) or ""
             end)
+            -- Try additional scene name methods on MapManager
+            if R.loaded_scene == "" then
+                pcall(function()
+                    local name = mm:call("getCurrentSceneName")
+                    if name and tostring(name) ~= "" then R.loaded_scene = tostring(name) end
+                end)
+            end
+            if R.loaded_scene == "" then
+                pcall(function()
+                    local name = mm:call("getMapName")
+                    if name and tostring(name) ~= "" then R.loaded_scene = tostring(name) end
+                end)
+            end
+            if R.loaded_scene == "" then
+                pcall(function()
+                    local name = mm:call("getSceneName")
+                    if name and tostring(name) ~= "" then R.loaded_scene = tostring(name) end
+                end)
+            end
             pcall(function() R.room_id = mm:call("getRoomID") or 0 end)
             pcall(function() R.map_cat = mm:call("getMapCategory") or 0 end)
             pcall(function() R.map_level = mm:call("getMapLevel") or 0 end)
