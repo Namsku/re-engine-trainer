@@ -133,6 +133,8 @@ local function run_tests(go, ctx)
 
     -- ── 6. EnemyController fields ──
     if ctx then
+        -- NowhereSafe.lua confirms RE3R enemy GUID lives here: ctx.GUID
+        add("ctx:get_field GUID",            function() return ctx:get_field("GUID") end)
         add("ctx:get_field _EnemyID",       function() return ctx:get_field("_EnemyID") end)
         add("ctx:get_field _SpawnID",        function() return ctx:get_field("_SpawnID") end)
         add("ctx:get_field EnemyID",         function() return ctx:get_field("EnemyID") end)

@@ -322,27 +322,63 @@ local function dist3(ax, ay, az, bx, by, bz)
 end
 
 -- GUID format validator: must be 8-4-4-4-12 hex with hyphens
-local _guid_pat = "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$"
+local _guid_pat  = "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$"
+local _null_guid = "00000000-0000-0000-0000-000000000000"
 
-local function extract_guid(go)
+-- Attempt to call ToString() on a System.Guid value type returned by the SDK.
+local function guid_to_str(g)
+    if not g then return nil end
+    local ok, s = pcall(g.call, g, "ToString()")
+    if not ok or not s then return nil end
+    local str = tostring(s)
+    if str:match(_guid_pat) and str ~= _null_guid then return str end
+    return nil
+end
+
+-- Extract a GUID from a live game object.
+--
+-- RE3R stores the enemy GUID on the EnemyController component (ctx.GUID),
+-- not on the via.GameObject itself (confirmed via NowhereSafe.lua).
+-- Items biorand places in scene files are authored with Guid.NewGuid() on
+-- the GameObject, so go:call("get_GUID()") works for those.
+--
+-- comp: the component that owns this record (EnemyController, Item, etc.)
+--       Pass nil when only the GO is available.
+local function extract_guid(go, comp)
     if not go then return nil end
-    -- Try the proper GUID API (returns System.Guid value type)
+
+    -- 1. Component-level GUID field (RE3R enemies: EnemyController.GUID)
+    if comp then
+        local g = nil
+        pcall(function() g = comp:get_field("GUID") end)
+        local s = guid_to_str(g)
+        if s then return s end
+    end
+
+    -- 2. GameObject's own get_GUID() (scene-authored objects, including biorand items)
     local ok, g = pcall(go.call, go, "get_GUID()")
     if ok and g then
-        local ok2, s2 = pcall(g.call, g, "ToString()")
-        if ok2 and s2 then
-            local str = tostring(s2)
-            if str:match(_guid_pat) then return str end
-        end
+        local s = guid_to_str(g)
+        if s then return s end
     end
-    -- Fall back to parsing ToString() — but only accept real UUID shape.
-    -- In RE3R, ToString() returns "GameObject[name@HEXADDR]", which is a
-    -- memory address that changes every session. Return nil for those.
-    local ok3, s = pcall(go.call, go, "ToString()")
-    if not ok3 or not s then return nil end
-    local raw = tostring(s):match("@([%x%-]+)%]$")
-    if raw and raw:match(_guid_pat) then return raw end
-    return nil  -- memory address — don't surface as GUID
+
+    -- 3. Scan all components for a GUID field (catches other component types)
+    local found = nil
+    pcall(function()
+        local count = go:call("get_ComponentCount") or 0
+        for i = 0, math.min(count - 1, 8) do
+            if found then break end
+            pcall(function()
+                local c = go:call("getComponent(System.Int32)", i)
+                if not c then return end
+                local g2 = nil
+                pcall(function() g2 = c:get_field("GUID") end)
+                local s2 = guid_to_str(g2)
+                if s2 then found = s2 end
+            end)
+        end
+    end)
+    return found
 end
 
 -- Get component of a known type from a GameObject
@@ -868,7 +904,7 @@ local function build_record(comp, cat)
     local go_name = ""
     pcall(function() go_name = tostring(go:call("get_Name") or "") end)
 
-    local guid = extract_guid(go)
+    local guid = extract_guid(go, comp)
 
     -- Full component type name (namespace.ClassName)
     local type_name = ""
