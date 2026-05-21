@@ -71,7 +71,10 @@ local R = {
     player_hp = 0, player_max_hp = 0,
     player_pos = nil, player_rot = nil, scene_name = "", chapter = "",
     loaded_scene = "",
-    da_score = 0, rank = 0, difficulty = 0, area_name = "", room_id = 0, map_cat = 0, map_level = 0,
+    last_loaded_scene = "", last_loaded_scene_short = "", last_loaded_scene_source = "", last_loaded_scene_time = 0,
+    current_map_zone = "", current_env_scene = "", current_env_scene_short = "", current_env_scene_source = "", current_map_zone_scene = "",
+    loaded_scene_history = {},
+    da_score = 0, rank = 0, difficulty = 0, area_name = "", room_id = 0, map_cat = 0, map_level = 0, map_sheet_name = "",
     _chapter_no = 0, _chapter_time = 0,
     dev_overlay_bottom = 0, damage_numbers = {},
     -- Selection (RE3R inspector style)
@@ -135,6 +138,77 @@ local function find_components(type_name)
     if not comps then return nil, 0 end
     local ok, n = pcall(comps.call, comps, "get_Count")
     return comps, (ok and n or 0)
+end
+
+local function component_at(comps, index)
+    if not comps then return nil end
+    local c = nil
+    pcall(function() c = comps:get_element(index) end)
+    if c == nil then pcall(function() c = comps:call("get_Item", index) end) end
+    return c
+end
+
+local function read_member(obj, name)
+    if not obj then return nil end
+    local v = nil
+    pcall(function() v = obj:call("get_" .. name) end)
+    if v == nil then pcall(function() v = obj:get_field(name) end) end
+    return v
+end
+
+local function ptr_to_string(ptr)
+    if not ptr then return nil end
+    local s = nil
+    pcall(function()
+        local obj = sdk.to_managed_object(ptr)
+        if obj then
+            pcall(function() s = obj:call("ToString") end)
+            if not s then s = tostring(obj) end
+        end
+    end)
+    if s and s ~= "" and s ~= "nil" then return tostring(s) end
+    return nil
+end
+
+local function scene_leaf(path)
+    if not path or path == "" then return "" end
+    return tostring(path):gsub("\\", "/"):match("([^/]+)$") or tostring(path)
+end
+
+local function list_count(list)
+    if not list then return 0 end
+    local n = 0
+    pcall(function() n = list:get_size() or n end)
+    n = tonumber(n) or 0
+    if n == 0 then pcall(function() n = list:call("get_Count") or n end) end
+    return tonumber(n) or 0
+end
+
+local function list_item(list, index)
+    if not list then return nil end
+    local v = nil
+    pcall(function() v = list:get_element(index) end)
+    if v == nil then pcall(function() v = list:call("get_Item", index) end) end
+    if v == nil then return nil end
+    v = tostring(v)
+    return v ~= "" and v or nil
+end
+
+local function record_loaded_scene(path, source)
+    if not path or path == "" then return end
+    local now = os.clock()
+    source = source or "loadScene"
+    R.last_loaded_scene = tostring(path)
+    R.last_loaded_scene_short = scene_leaf(path)
+    R.last_loaded_scene_source = source
+    R.last_loaded_scene_time = now
+    if R.loaded_scene_history[1] and R.loaded_scene_history[1].path == R.last_loaded_scene then
+        R.loaded_scene_history[1].time = now
+        R.loaded_scene_history[1].source = source
+        return
+    end
+    table.insert(R.loaded_scene_history, 1, { path = R.last_loaded_scene, source = source, time = R.last_loaded_scene_time })
+    while #R.loaded_scene_history > 8 do table.remove(R.loaded_scene_history) end
 end
 
 -- HP access: DamageController → HealthInfo → Health/MaxHealth
@@ -704,6 +778,399 @@ pcall(function()
 end)
 
 -- ═══════════════════════════════════════════════════════════════════════════
+-- Scene Path Detection (ported from v2.1)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+local function map_zone_key(path)
+    if not path or path == "" then return nil end
+    local key = scene_leaf(path):lower():gsub("%.scn%.%d+$", "")
+    if key:match("_mapzone$") then return key end
+    return nil
+end
+
+local function map_zone_to_scenes(zone_path)
+    local key = map_zone_key(zone_path)
+    if not key then return nil, nil end
+    local base = key:gsub("_mapzone$", "")
+    local path = tostring(zone_path):lower():gsub("\\", "/")
+    local chapter = base:match("^c0*(%d+)") or path:match("chapter(%d+)")
+    local env = chapter
+        and ("natives/stm/environment/scene/chapter" .. tostring(tonumber(chapter) or chapter) .. "/" .. base .. ".scn.20")
+        or  ("natives/stm/environment/scene/" .. base .. ".scn.20")
+    return env, "natives/stm/ui/scene/mapzone/" .. key .. ".scn.20"
+end
+
+local function set_current_player_scene(path, source)
+    if not path or path == "" then return end
+    R.current_env_scene = tostring(path)
+    R.current_env_scene_short = scene_leaf(path)
+    R.current_env_scene_source = source or ""
+end
+
+local function environment_scene_key(path)
+    if not path or path == "" then return nil end
+    local key = scene_leaf(path):lower():gsub("%.scn%.%d+$", "")
+    if not key:match("^c%d%d") then return nil end
+    if key:find("mapzone",1,true) or key:find("loadcollision",1,true)
+        or key:find("cullingcollision",1,true) or key:find("levelfsm",1,true)
+        or key:find("light",1,true) then return nil end
+    return key
+end
+
+local GENERIC_ENV_CONTAINERS = {
+    c03_oldhouse=true, c03_mainhouse=true, c03_leftarea=true,
+    c03_rightarea=true, c03_gh=true, c03_boat=true,
+    c04_ship=true, c07_mainhouse=true, c07_leftarea=true, c07_rightarea=true,
+}
+local function is_generic_environment_container(key)
+    if not key then return false end
+    key = tostring(key):lower()
+    if GENERIC_ENV_CONTAINERS[key] then return true end
+    for _, root in ipairs({"oldhouse","mainhouse","leftarea","rightarea","gh","boat","ship"}) do
+        if key:match("^c%d%d_"..root.."%d+f$") or key:match("^c%d%d_"..root.."b%d+f$")
+            or key:match("^c%d%d_"..root.."b%d+$") then return true end
+    end
+    return false
+end
+
+local function environment_scene_from_key(key, source_path)
+    if not key or key == "" then return nil end
+    local path = tostring(source_path or ""):gsub("\\", "/"):lower()
+    local ff = path:match("/(ff%d%d%d)/") or path:match("^(ff%d%d%d)/")
+    if ff then return "natives/stm/environment/scene/"..ff.."/"..key..".scn.20" end
+    local chapter = path:match("chapter/chapter(%d+)") or path:match("/chapter(%d+)/")
+        or path:match("^chapter(%d+)/") or path:match("chapter(%d+)") or key:match("^c0*(%d+)")
+    if not chapter then return nil end
+    return "natives/stm/environment/scene/chapter"..tostring(tonumber(chapter) or chapter).."/"..key..".scn.20"
+end
+
+local function folder_to_environment_scene(path)
+    if not path or path == "" then return nil end
+    local normalized = tostring(path):gsub("\\", "/"):lower()
+    local best = nil
+    for part in normalized:gmatch("[^/]+") do
+        local key = environment_scene_key(part)
+        if key and not is_generic_environment_container(key) then best = key end
+    end
+    if not best then
+        local key = environment_scene_key(normalized)
+        if key and not is_generic_environment_container(key) then best = key end
+    end
+    return best and environment_scene_from_key(best, path) or nil
+end
+
+local function exact_folder_to_environment_scene(path)
+    local key = environment_scene_key(path)
+    if is_generic_environment_container(key) then return nil end
+    return environment_scene_from_key(key, path)
+end
+
+local function folder_path(folder)
+    if not folder then return nil end
+    local path = nil
+    pcall(function() path = folder:call("get_Path") end)
+    if not path or path == "" then pcall(function() path = folder:call("get_Name") end) end
+    return path and tostring(path) or nil
+end
+
+local function component_folder_path(component)
+    if not component then return nil end
+    local go = nil
+    pcall(function() go = component:call("get_GameObject") end)
+    if not go then return nil end
+    local folder = nil
+    pcall(function() folder = go:call("get_Folder") end)
+    return folder_path(folder)
+end
+
+local function game_object_folder_path(go)
+    if not go then return nil end
+    local folder = nil
+    pcall(function() folder = go:call("get_Folder") end)
+    if not folder then pcall(function() folder = go:call("get_FolderSelf") end) end
+    return folder_path(folder)
+end
+
+local function is_scene_probe_name_ignored(name)
+    if not name or name == "" then return true end
+    local n = tostring(name)
+    if #n > 80 then return true end
+    local lower = n:lower()
+    for _, token in ipairs({"pl0000","player","camera","mapzone","gui","ui_","minimap",
+        "scene","manager","system","root","fsm","event","trigger","collision","collider",
+        "areahit","navmesh","sound","wwise","effect","vfx","light","cubemap"}) do
+        if lower:find(token,1,true) then return true end
+    end
+    return false
+end
+
+local function find_nearest_environment_object_scene()
+    local ppos = R.player_pos
+    local scene = get_scene()
+    if not ppos or not scene then return nil, nil end
+    local first = nil
+    pcall(function() first = scene:call("get_FirstTransform") end)
+    if not first then return nil, nil end
+    local stack, seen, count = { first }, {}, 0
+    local candidates = {}
+    while #stack > 0 and count < 1800 do
+        local xf = table.remove(stack)
+        if xf then
+            local id = tostring(xf:get_address())
+            if not seen[id] then
+                seen[id] = true; count = count + 1
+                pcall(function()
+                    local go = xf:call("get_GameObject")
+                    if not go then return end
+                    local name = tostring(go:call("get_Name") or "")
+                    if is_scene_probe_name_ignored(name) then return end
+                    local pos = xf:call("get_Position")
+                    if not pos then return end
+                    local dx, dy, dz = (pos.x or 0)-(ppos.x or 0), (pos.y or 0)-(ppos.y or 0), (pos.z or 0)-(ppos.z or 0)
+                    local dist = math.sqrt(dx*dx+dy*dy+dz*dz)
+                    if dist > 12 then return end
+                    local folder = game_object_folder_path(go)
+                    if not folder or folder == "" then return end
+                    local lf = tostring(folder):lower()
+                    if lf:find("mapzone",1,true) or lf:find("loadcollision",1,true)
+                        or lf:find("cullingcollision",1,true) or lf:find("_light",1,true)
+                        or lf:find("/light",1,true) or lf:find("/sound",1,true)
+                        or lf:find("/vfx",1,true) then return end
+                    local env_scene = folder_to_environment_scene(folder)
+                    if not env_scene then return end
+                    local entry = candidates[env_scene]
+                    if not entry then
+                        entry = { scene=env_scene, count=0, distance=99999, object="", folder="" }
+                        candidates[env_scene] = entry
+                    end
+                    entry.count = entry.count + 1
+                    if dist < entry.distance then entry.distance=dist; entry.object=name; entry.folder=tostring(folder) end
+                end)
+                local child, next_xf = nil, nil
+                pcall(function() child = xf:call("get_Child") end)
+                pcall(function() next_xf = xf:call("get_Next") end)
+                if next_xf then stack[#stack+1] = next_xf end
+                if child then stack[#stack+1] = child end
+            end
+        end
+    end
+    local best, best_score = nil, -99999
+    for _, entry in pairs(candidates) do
+        local score = -entry.distance + math.min(entry.count,8)*0.35
+        if score > best_score then best=entry; best_score=score end
+    end
+    if best then
+        return best.scene, ("nearby object: %s %.1fm"):format(
+            best.object ~= "" and best.object or scene_leaf(best.folder), best.distance)
+    end
+    return nil, nil
+end
+
+local function recent_loaded_environment_scene()
+    if R.last_loaded_scene == "" or R.last_loaded_scene_time <= 0 then return nil, nil end
+    if os.clock() - R.last_loaded_scene_time > 20 then return nil, nil end
+    local scene = folder_to_environment_scene(R.last_loaded_scene)
+    if not scene then return nil, nil end
+    return scene, "recent loaded scene"
+end
+
+local function read_player_area_scene()
+    local player = getLocalPlayer()
+    if not player then return nil, nil end
+    local ahm = nil
+    pcall(function() ahm = sdk.get_managed_singleton("app.AreaHitManager") end)
+    if not ahm then return nil, nil end
+    for area_type = 0, 5 do
+        local hit = nil
+        pcall(function() hit = ahm:call("getStayAreaHitObj(via.GameObject, app.AreaHitObj.AreaHitType)", player, area_type) end)
+        if not hit then pcall(function() hit = ahm:call("getStayAreaHitObj", player, area_type) end) end
+        if hit then
+            local scene = folder_to_environment_scene(read_member(hit, "AreaName"))
+            if scene then return scene, "area hit" end
+            scene = folder_to_environment_scene(component_folder_path(hit))
+            if scene then return scene, "area hit" end
+        end
+    end
+    return nil, nil
+end
+
+local function find_room_map_zone_folder(room_id)
+    room_id = tonumber(room_id) or 0
+    if room_id <= 0 then return nil end
+    local comps, n = find_components("app.cutin.MapZoneCollider")
+    if not comps then return nil end
+    for i = 0, math.min(tonumber(n) or 0, 1500) - 1 do
+        local collider = component_at(comps, i)
+        if collider then
+            local rid = tonumber(read_member(collider, "RoomId")) or 0
+            if rid == room_id then
+                local path = component_folder_path(collider)
+                if path and map_zone_key(path) then return path end
+            end
+        end
+    end
+    return nil
+end
+
+local function read_async_current_map_zone()
+    local zone = nil
+    pcall(function()
+        local alm = sdk.get_managed_singleton("app.AsyncLoadManager")
+        local names = alm and alm:call("getCurrentFolderName")
+        local n = math.min(list_count(names), 120)
+        for i = 0, n - 1 do
+            local name = list_item(names, i)
+            if map_zone_key(name) then zone = name end
+        end
+    end)
+    return zone
+end
+
+local function find_active_map_zone_folder()
+    local scene = get_scene()
+    if not scene then return nil end
+    local first = nil
+    pcall(function() first = scene:call("get_FirstFolder") end)
+    if not first then return nil end
+    local stack, seen, count, zone = { first }, {}, 0, nil
+    while #stack > 0 and count < 1500 do
+        local folder = table.remove(stack)
+        if folder then
+            local id = tostring(folder:get_address())
+            if not seen[id] then
+                seen[id] = true; count = count + 1
+                local path, active = nil, false
+                pcall(function() path = folder:call("get_Path") end)
+                if not path or path == "" then pcall(function() path = folder:call("get_Name") end) end
+                pcall(function() active = folder:call("get_Active") end)
+                if active and map_zone_key(path) then zone = tostring(path) end
+                local child, nxt = nil, nil
+                pcall(function() child = folder:call("get_Child") end)
+                pcall(function() nxt   = folder:call("get_Next") end)
+                if nxt   then stack[#stack+1] = nxt   end
+                if child then stack[#stack+1] = child end
+            end
+        end
+    end
+    return zone
+end
+
+local function find_active_environment_scene_folder()
+    local scene = get_scene()
+    if not scene then return nil end
+    local first = nil
+    pcall(function() first = scene:call("get_FirstFolder") end)
+    if not first then return nil end
+    local stack, seen, count, best = { first }, {}, 0, nil
+    while #stack > 0 and count < 1500 do
+        local folder = table.remove(stack)
+        if folder then
+            local id = tostring(folder:get_address())
+            if not seen[id] then
+                seen[id] = true; count = count + 1
+                local path = folder_path(folder)
+                local active = false
+                pcall(function() active = folder:call("get_Active") end)
+                if active and exact_folder_to_environment_scene(path) and (not best or #path > #best) then
+                    best = path
+                end
+                local child, nxt = nil, nil
+                pcall(function() child = folder:call("get_Child") end)
+                pcall(function() nxt   = folder:call("get_Next") end)
+                if nxt   then stack[#stack+1] = nxt   end
+                if child then stack[#stack+1] = child end
+            end
+        end
+    end
+    return best
+end
+
+local function refresh_current_scene_paths()
+    local current_path, current_source = find_nearest_environment_object_scene()
+    local zone_found = false
+
+    local room_zone = find_room_map_zone_folder(R.room_id)
+    if room_zone then
+        zone_found = true
+        R.current_map_zone = tostring(room_zone)
+        local _, map_zone_scene = map_zone_to_scenes(room_zone)
+        R.current_map_zone_scene = map_zone_scene or ""
+    end
+
+    if not zone_found then
+        local zone = read_async_current_map_zone() or find_active_map_zone_folder()
+        if zone then
+            zone_found = true
+            R.current_map_zone = tostring(zone)
+            local _, map_zone_scene = map_zone_to_scenes(zone)
+            R.current_map_zone_scene = map_zone_scene or ""
+        end
+    end
+
+    if not zone_found then
+        R.current_map_zone = ""; R.current_map_zone_scene = ""
+    end
+
+    if not current_path then current_path, current_source = recent_loaded_environment_scene() end
+    if not current_path then current_path, current_source = read_player_area_scene() end
+
+    if not current_path then
+        local active_scene = exact_folder_to_environment_scene(find_active_environment_scene_folder())
+        if active_scene then current_path = active_scene; current_source = "active folder" end
+    end
+
+    if not current_path and R.current_map_zone ~= "" then
+        local env = map_zone_to_scenes(R.current_map_zone)
+        if env then current_path = env; current_source = "coarse map zone" end
+    end
+
+    if current_path then
+        set_current_player_scene(current_path, current_source)
+    else
+        R.current_env_scene = ""; R.current_env_scene_short = ""; R.current_env_scene_source = ""
+    end
+
+    pcall(function()
+        local mm = sdk.get_managed_singleton("app.MapManager")
+        local loaded = read_member(mm, "LoadedSceneName")
+        if loaded and tostring(loaded) ~= "" then record_loaded_scene(tostring(loaded), "MapManager") end
+    end)
+end
+
+-- Scene-load hooks: record every scene string as it flies through the engine
+pcall(function()
+    local sm_td = sdk.find_type_definition("via.SceneManager")
+    local method = sm_td and sm_td:get_method("loadScene(System.String)")
+    if not method then error("missing via.SceneManager.loadScene(System.String)") end
+    sdk.hook(method, function(args)
+        local path = ptr_to_string(args[2]) or ptr_to_string(args[3])
+        if path then record_loaded_scene(path, "SceneManager.loadScene") end
+    end, nil)
+end)
+
+pcall(function()
+    local alm_td = sdk.find_type_definition("app.AsyncLoadManager")
+    if not alm_td then return end
+    local hooked = 0
+    for _, entry in ipairs({
+        {"requestLoad(System.String)",                          "AsyncLoad.requestLoad"},
+        {"requestActivate(System.String, System.Boolean)",      "AsyncLoad.requestActivate"},
+        {"requestStandby(System.String, System.Boolean)",       "AsyncLoad.requestStandby"},
+        {"requestCheckActive(System.String)",                   "AsyncLoad.requestCheckActive"},
+    }) do
+        local method = alm_td:get_method(entry[1])
+        if method then
+            local src = entry[2]
+            sdk.hook(method, function(args)
+                local path = ptr_to_string(args[3]) or ptr_to_string(args[2])
+                if path then record_loaded_scene(path, src) end
+            end, nil)
+            hooked = hooked + 1
+        end
+    end
+end)
+
+-- ═══════════════════════════════════════════════════════════════════════════
 -- Noclip (proven: CharacterController.warp + WASD)
 -- ═══════════════════════════════════════════════════════════════════════════
 local _noclip_cc_was_disabled = false
@@ -973,6 +1440,14 @@ local function draw_chapter_overlay(offset_y)
 
     -- Chapter / location
     kv("Chapter",  R.chapter ~= "" and R.chapter or "?", yellow)
+    if R.map_sheet_name ~= "" then
+        kv("Area", R.map_sheet_name, 0xFFFFDD88)
+    end
+    if R.current_env_scene_short ~= "" then
+        kv("Env", R.current_env_scene_short, 0xFF88CCFF)
+    elseif R.last_loaded_scene_short ~= "" then
+        kv("Last Scn", R.last_loaded_scene_short, 0xFF7799AA)
+    end
     kv("Room",     R.room_id > 0 and ("#"..R.room_id) or "?", grey)
     kv("Diff",     DIFFICULTY_NAMES[R.difficulty] or tostring(R.difficulty), cyan)
     div()
@@ -2406,7 +2881,47 @@ re.on_frame(function()
             pcall(function() R.room_id = mm:call("getRoomID") or 0 end)
             pcall(function() R.map_cat = mm:call("getMapCategory") or 0 end)
             pcall(function() R.map_level = mm:call("getMapLevel") or 0 end)
+            pcall(function()
+                local floor_id = tonumber(mm:get_field("_CurrentFloorId")) or 0
+                if floor_id <= 0 then return end
+                local mss = mm:get_field("_MapSheetSettings")
+                local settings = mss and mss:get_field("_Settings")
+                if not settings then return end
+                local cnt = settings:call("get_Count") or 0
+                local best_name, best_range = "", math.huge
+                for i = 0, cnt - 1 do
+                    pcall(function()
+                        local item = settings:call("get_Item", i)
+                        if not item then return end
+                        local fl_list = item:get_field("FloorIdList")
+                        if not fl_list then return end
+                        local n = fl_list:call("get_Count") or 0
+                        for j = 0, n - 1 do
+                            pcall(function()
+                                local entry = fl_list:call("get_Item", j)
+                                if not entry then return end
+                                local lo = tonumber(entry:get_field("FloorIDStart"))
+                                local hi = tonumber(entry:get_field("FloorIDEnd"))
+                                if lo and hi and floor_id >= lo and floor_id <= hi then
+                                    local range_size = hi - lo
+                                    if range_size < best_range then
+                                        best_range = range_size
+                                        best_name = tostring(item:get_field("MapSheetName") or "")
+                                    end
+                                end
+                            end)
+                        end
+                    end)
+                end
+                if best_name ~= "" and best_name ~= "nil" then
+                    R.map_sheet_name = best_name
+                end
+            end)
         end)
+        -- Scene path detection (expensive; runs every 3× the normal scan interval)
+        if R.current_env_scene == "" or R.tick % (3 * (C.scan_interval or 45)) == 0 then
+            pcall(refresh_current_scene_paths)
+        end
         pcall(function() R.enemies = scan_enemies() or {} end)
         pcall(function() R.items = scan_items() or {} end)
         pcall(function() R.spawners = scan_spawners() or {} end)
@@ -2438,7 +2953,10 @@ re.on_script_reset(function()
     R.player_hp = 0; R.player_max_hp = 0
     R.player_pos = nil; R.player_rot = nil
     R.scene_name = ""; R.loaded_scene = ""; R.chapter = ""
-    R.area_name = ""; R.room_id = 0; R.map_cat = 0; R.map_level = 0
+    R.last_loaded_scene = ""; R.last_loaded_scene_short = ""; R.last_loaded_scene_source = ""; R.last_loaded_scene_time = 0
+    R.current_map_zone = ""; R.current_env_scene = ""; R.current_env_scene_short = ""; R.current_env_scene_source = ""; R.current_map_zone_scene = ""
+    R.loaded_scene_history = {}
+    R.area_name = ""; R.room_id = 0; R.map_cat = 0; R.map_level = 0; R.map_sheet_name = ""
     R.da_score = 0; R.rank = 0; R.difficulty = 0
     R._chapter_no = 0; R._chapter_time = 0
     R.flow_name = ""; R.flow_id = 0; R.prev_flow_name = ""
