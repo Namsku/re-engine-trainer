@@ -941,7 +941,7 @@ local function draw_spawn_overlay()
     for i = 1, visible do
         local e = entries[i]
         d2d_text(vf, string.format("%dm", math.floor(e.dist+0.5)), cx,        cy, grey)
-        d2d_text(vf, clamp_text(e.go_name, 36),                    cx+DIST_W, cy, C.col_spawn_name)
+        d2d_text(vf, clamp_text(e.go_name, 48),                    cx+DIST_W, cy, C.col_spawn_name)
         cy = cy + LH
     end
     return height + 10
@@ -1122,10 +1122,18 @@ local function render_esp_items()
         local sp = world_to_screen(it.pos, 0.5)
         if sp then
             local lines = {
-                { text=it.go_name or "?",              col=C.col_item_name },
-                { text=string.format("%.1fm", it.dist), col=0xFFAAAAAA     },
+                { text=it.go_name or "?",               col=C.col_item_name },
+                { text=string.format("%.1fm", it.dist),  col=0xFFAAAAAA     },
             }
-            local draw_y = sp.y - #lines * lh
+            local total_h = #lines * lh
+            local max_w = 0
+            for _, ln in ipairs(lines) do
+                local w = #ln.text * C.font_size * 0.52
+                if w > max_w then max_w = w end
+            end
+            local draw_y = sp.y - total_h
+            local bx = sp.x - max_w*0.5 - 4
+            d2d_fill_rect(bx, draw_y - 2, max_w + 8, total_h + 4, 0xAA000000)
             for i, ln in ipairs(lines) do
                 local f  = (i==1) and font_big or (font_sm or font_big)
                 local tw = #ln.text * C.font_size * 0.52
@@ -1150,7 +1158,7 @@ local function render_esp_spawners()
         local sp = world_to_screen(s.pos, 0.5)
         if sp then
             local lines = {
-                { text=clamp_text(s.go_name or "?", 26), col=C.col_spawn_name },
+                { text=s.go_name or "?", col=C.col_spawn_name },
                 { text=string.format("%.1fm", s.dist),   col=0xFFAAAAAA },
             }
             local draw_y = sp.y - #lines * lh
@@ -1177,7 +1185,7 @@ local function render_esp_objects()
         local sp = world_to_screen(obj.pos, 0.5)
         if sp then
             local tag  = obj.tags and #obj.tags > 0 and obj.tags[1] or ""
-            local name = clamp_text(obj.go_name or "?", 20)
+            local name = obj.go_name or "?"
             local tag_col = 0xFF88FFCC
             if tag == "Enemy"  then tag_col = 0xFFFF6666
             elseif tag == "Item"   then tag_col = 0xFF55FF99
